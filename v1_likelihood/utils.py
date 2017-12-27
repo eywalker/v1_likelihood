@@ -1,5 +1,8 @@
 import numpy as np
 from numpy.linalg import inv
+import hashlib
+import random
+import torch
 
 
 def extend_ones(x):
@@ -14,3 +17,32 @@ def lin_reg(train_counts, train_ori, valid_counts):
     t_hat = extend_ones(valid_counts) @ w
 
     return np.sqrt(np.mean((t_hat - valid_ori)**2)) * delta
+
+
+def list_hash(values):
+    """
+    Returns MD5 digest hash values for a list of values
+    """
+    hashed = hashlib.md5()
+    for v in values:
+        hashed.update(str(v).encode())
+    return hashed.hexdigest()
+
+
+def key_hash(key):
+    """
+    32-byte hash used for lookup of primary keys of jobs
+    """
+    hashed = hashlib.md5()
+    for k, v in sorted(key.items()):
+        hashed.update(str(v).encode())
+    return hashed.hexdigest()
+
+
+def set_seed(seed, cuda=True):
+    print('Setting numpy and torch seed to', seed, flush=True)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(int(seed))
+    if cuda:
+        torch.cuda.manual_seed(int(seed))
