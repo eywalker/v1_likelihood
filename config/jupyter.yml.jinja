@@ -1,0 +1,22 @@
+version: '3'
+services:
+  # Add as many notebooks as GPUs
+  {% for i in range(N_GPU) %}
+  notebook{{i}}:
+    build: .
+    env_file: .env
+    ports:
+      - "444{{i}}:8888"
+    devices:
+      - /dev/nvidia{{i}}
+    volumes:
+      - /mnt/lab/users/eywalker/notebooks:/notebooks
+      - /tmp:/tmp
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ../attorch:/src/attorch
+      - ../cortex_ex_machina:/src/cortex_ex_machina
+      - ../netgard:/src/netgard
+      - /mnt/lab/microns/data:/data
+    environment:
+      - DISPLAY=$DISPLAY
+  {% endfor %}

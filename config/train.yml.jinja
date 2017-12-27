@@ -1,0 +1,21 @@
+version: '3'
+services:
+  # Add as many notebooks as GPUs
+  {% set jobs=['train'] %}
+  {% for i in range(N_GPU) %}
+  {% for job in jobs %}
+  {{job}}{{i}}:
+    build:
+      context: .
+      dockerfile: Dockerfiles/Dockerfile.runner
+    hostname: ${HOSTNAME}-gpu{{i}}
+    ipc: host
+    command: '/src/v1_likelihood/scripts/{{job}}.py'
+    env_file: .env
+    devices:
+      - /dev/nvidia{{i}}
+    volumes:
+      - /tmp:/tmp
+      - /mnt/lab/users/eywalker/data:/data
+  {% endfor %}
+  {% endfor %}
