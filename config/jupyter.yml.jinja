@@ -6,7 +6,7 @@ services:
     build: .
     env_file: .env
     ports:
-      - "444{{i}}:8888"
+      - "555{{i}}:8888"
     devices:
       - /dev/nvidia{{i}}
     volumes:
@@ -14,9 +14,8 @@ services:
       - /tmp:/tmp
       - /tmp/.X11-unix:/tmp/.X11-unix
       - ../attorch:/src/attorch
-      - ../cortex_ex_machina:/src/cortex_ex_machina
-      - ../netgard:/src/netgard
-      - /mnt/lab/microns/data:/data
+      - ../v1_likelihood:/src/v1_likelihood
+      - /mnt/lab/users/eywalker/data:/data
     environment:
       - DISPLAY=$DISPLAY
   {% endfor %}

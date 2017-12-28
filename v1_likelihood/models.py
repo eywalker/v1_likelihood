@@ -27,7 +27,10 @@ class Net(nn.Module):
             if dropout > 0.0:
                 hiddens.append(nn.Dropout(p=dropout, inplace=True))
             n_prev = n
-        self.hiddens = nn.Sequential(*hiddens)
+        if len(hiddens) > 0:
+            self.hiddens = nn.Sequential(*hiddens)
+        else:
+            self.hiddens = lambda x: x
         self.ro_layer = nn.Linear(n_prev, n_output)
 
         self.initialize()

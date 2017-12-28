@@ -1,4 +1,4 @@
-FROM ninai/netgard:latest
+FROM eywalker/attorch:latest
 LABEL maintainer "Edgar Y. Walker <edgar.walker@gmail.com>"
 
 ADD . /src/v1_likelihood
