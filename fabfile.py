@@ -135,7 +135,7 @@ def availability():
 
 
 def build_attorch(pull=True, no_cache=True, push=True):
-    build_path = join(env.base_dir, 'attorch')
+    build_path = join(env.basedir, 'attorch')
     pull_code(build_path)
 
     pull = strtobool(str(pull))

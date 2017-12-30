@@ -11,10 +11,7 @@ from .models import Net
 from .utils import list_hash, set_seed
 from itertools import chain, product, count
 
-
-
-cd_dataset = dj.create_virtual_module('cd_dataset', 'edgar_cd_dataset')
-class_discrimination = dj.create_virtual_module('class_discrimination', 'edgar_class_discrimination')
+from .cd_dataset import CleanContrastSessionDataSet
 
 schema = dj.schema('edgar_cd_ml', locals())
 
@@ -34,17 +31,6 @@ def binnify(x, center=270, delta=1, nbins=61, clip=True):
 
     xv = (np.arange(nbins) - nbins//2) * delta + center
     return xv, p
-
-
-@cd_dataset.schema
-class CleanContrastSessionDataSet(dj.Computed):
-    def fetch_dataset(self):
-        assert len(self)==1, 'Only can fetch one dataset at a time!'
-        data = (class_discrimination.ClassDiscriminationTrial() * class_discrimination.SpikeCountTrials() * class_discrimination.CSCLookup() & class_discrimination.CleanSpikeCountTrials() & self).fetch(order_by='trial_num')
-        contrast = float(self.fetch1('dataset_contrast'))
-        f = data['contrast'] == contrast
-        return data[f]
-
 
 
 @schema
@@ -67,9 +53,15 @@ class CVSeed(dj.Lookup):
 @schema
 class CVConfig(dj.Lookup):
     definition = """
-    cv_fraction: decimal(4,3)   # fraction
+    cv_config_id: varchar(128)  # id for config
+    ---
+    cv_fraction: float   # fraction
     """
-    contents = zip((0.8,))
+    contents = [
+        (list_hash(x),) + x for x in [
+            (0.8,)
+        ]
+    ]
 
 
 @schema
@@ -87,7 +79,7 @@ class CVSet(dj.Computed):
         print('Working on ', key)
         seed = key['cv_seed']
         np.random.seed(seed)
-        fraction = key['cv_fraction']
+        fraction = float((CVConfig() & key).fetch1('cv_fraction'))
         dataset = (CleanContrastSessionDataSet() & key).fetch_dataset()
         N = len(dataset)
         pos = np.arange(N)
@@ -183,7 +175,6 @@ class ModelDesign(dj.Lookup):
     """
     contents = [(list_hash(x),) + x for x in [
         (400, 400),
-        (500, 500),
         (600, 600)
     ]]
 
@@ -199,10 +190,10 @@ class TrainParam(dj.Lookup):
     smoothness:     float     # regularizer on Laplace smoothness
     """
     contents = [(list_hash(x), ) + x for x in product(
-        (0.03, 0.1),     # learning rate
-        (0.5, 0.9),      # dropout rate
-        (0.001,),         # initialization std
-        (3e-2, 3e-1, 3)  # smoothness
+        (0.03,),     # learning rate
+        (0.5,),      # dropout rate
+        (0.0001,),         # initialization std
+        (0.3, 30)  # smoothness
     )]
 
 @schema
@@ -221,6 +212,7 @@ class CVTrainedModel(dj.Computed):
     """
 
     def _make_tuples(self, key):
+        print('Working!')
 
         train_set, test_set = (CVSet() & key).fetch_datasets()
         bin_width, bin_counts, clip_outside = (BinConfig() & key).fetch1('bin_width', 'bin_counts', 'clip_outside')
@@ -316,8 +308,11 @@ class CVTrainedModel(dj.Computed):
 
         loc = yd.argmax(axis=1)
         ds = (np.arange(bin_counts) - loc[:, None]) ** 2
+        avg_sigma = np.mean(np.sqrt(np.sum(yd * ds, axis=1))) * bin_width
+        if np.isnan(avg_sigma):
+          avg_sigma = -1
 
-        key['avg_sigma'] = np.mean(np.sqrt(np.sum(yd * ds, axis=1))) * bin_width
+        key['avg_sigma'] = avg_sigma
         key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
 
         self.insert1(key)
