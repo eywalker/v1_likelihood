@@ -33,14 +33,6 @@ def binnify(x, center=270, delta=1, nbins=61, clip=True):
     return xv, p
 
 
-@schema
-class TrainSeed(dj.Lookup):
-    definition = """
-    # training seed
-    train_seed:   int       # training seed
-    """
-    contents = zip((8, 92, 123))
-
 
 @schema
 class CVSeed(dj.Lookup):
@@ -163,7 +155,13 @@ class LinearRegression(dj.Computed):
 
         self.insert1(key)
 
-
+@schema
+class TrainSeed(dj.Lookup):
+    definition = """
+    # training seed
+    train_seed:   int       # training seed
+    """
+    contents = zip((8, 92, 123))
 
 @schema
 class ModelDesign(dj.Lookup):
@@ -261,18 +259,18 @@ class CVTrainedModel(dj.Computed):
             v = (t.double() - loc.double()).pow(2).mean().sqrt() * delta
             return v.data.cpu().numpy()[0]
 
-        init_lr = 0.03
-        alpha = 30  # 3e-2 #7e-3 #1e-3
-        init_std = 0.001
-        dropout = 0.5
-        h1, h2 = 600, 600
-        seed = 8
+        init_lr = float((TrainParam() & key).fetch1('learning_rate'))
+        alpha = float((TrainParam() & key).fetch1('smoothness'))
+        init_std = float((TrainParam() & key).fetch1('init_std'))
+        dropout = float((TrainParam() & key).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (ModelDesign() & key).fetch1('hidden1', 'hidden2')]
+        seed = key['train_seed']
 
         net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
         net.cuda()
         loss = nn.CrossEntropyLoss().cuda()
 
-        net.std = 1e-3
+        net.std = init_std
         set_seed(seed)
         net.initialize()
 
