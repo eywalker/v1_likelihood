@@ -174,7 +174,6 @@ class ModelDesign(dj.Lookup):
     hidden2:  int      # size of second hidden layer
     """
     contents = [(list_hash(x),) + x for x in [
-        (400, 400),
         (600, 600)
     ]]
 
@@ -192,8 +191,8 @@ class TrainParam(dj.Lookup):
     contents = [(list_hash(x), ) + x for x in product(
         (0.03,),     # learning rate
         (0.5,),      # dropout rate
-        (0.0001,),         # initialization std
-        (0.3, 30)  # smoothness
+        (0.001,),    # initialization std
+        (30,)  # smoothness
     )]
 
 @schema
@@ -205,8 +204,8 @@ class CVTrainedModel(dj.Computed):
     -> TrainParam
     -> TrainSeed
     ---
-    cnn_trainset_score: float   # score on train set
-    cnn_testset_score:  float   # score on test set
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
     avg_sigma:   float   # average width of the likelihood functions
     model: longblob      # trained model
     """
@@ -214,68 +213,76 @@ class CVTrainedModel(dj.Computed):
     def _make_tuples(self, key):
         print('Working!')
 
-        train_set, test_set = (CVSet() & key).fetch_datasets()
-        bin_width, bin_counts, clip_outside = (BinConfig() & key).fetch1('bin_width', 'bin_counts', 'clip_outside')
-        bin_counts = int(bin_counts)
-        bin_width = float(bin_width)
+        train_set, valid_set = (CVSet() & key).fetch_datasets()
+        bin_width = float((BinConfig() & key).fetch1('bin_width'))
+        bin_counts = int((BinConfig() & key).fetch1('bin_counts'))
+        clip_outside = bool((BinConfig() & key).fetch1('clip_outside'))
+
+        delta = bin_width
+        nbins = bin_counts
 
         train_counts, train_ori = np.concatenate(train_set['counts'], 1).T, train_set['orientation']
-        test_counts, test_ori = np.concatenate(test_set['counts'], 1).T, test_set['orientation']
+        valid_counts, valid_ori = np.concatenate(valid_set['counts'], 1).T, valid_set['orientation']
 
         xv, train_bins = binnify(train_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
-        _, test_bins = binnify(test_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+        _, valid_bins = binnify(valid_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
 
         good_pos = train_bins >= 0
         train_counts = train_counts[good_pos]
-        train_bins = train_bins[good_pos]
+        train_ori = train_bins[good_pos]
 
-        good_pos = test_bins >= 0
-        test_counts = test_counts[good_pos]
-        test_bins = test_bins[good_pos]
+        good_pos = valid_bins >= 0
+        valid_counts = valid_counts[good_pos]
+        valid_ori = valid_bins[good_pos]
 
         sigmaA = 3
         sigmaB = 15
-
-        prior = np.log(np.exp(- xv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- xv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
         prior = Variable(torch.from_numpy(prior)).cuda().float()
 
         train_x = torch.Tensor(train_counts)
-        train_t = torch.Tensor(train_bins).type(torch.LongTensor)
+        train_t = torch.Tensor(train_ori).type(torch.LongTensor)
 
-        test_x = Variable(torch.Tensor(test_counts)).cuda()
-        test_t = Variable(torch.Tensor(test_bins).type(torch.LongTensor)).cuda()
+        valid_x = Variable(torch.Tensor(valid_counts)).cuda()
+        valid_t = Variable(torch.Tensor(valid_ori).type(torch.LongTensor)).cuda()
 
         train_dataset = TensorDataset(train_x, train_t)
-        test_dataset = TensorDataset(test_x, test_t)
+        valid_dataset = TensorDataset(valid_x, valid_t)
 
         def objective(net, x=None, t=None):
             if x is None and t is None:
-                x = test_x
-                t = test_t
+                x = valid_x
+                t = valid_t
             net.eval()
             y = net(x)
             posterior = y + prior
             _, loc = torch.max(posterior, dim=1)
-            v = (t.double() - loc.double()).pow(2).mean().sqrt() * bin_width
+            v = (t.double() - loc.double()).pow(2).mean().sqrt() * delta
             return v.data.cpu().numpy()[0]
 
-        ## setup model
-        h1, h2 = (ModelDesign() & key).fetch1('hidden1', 'hidden2')
-        h1, h2 = int(h1), int(h2)
-        lr, dropout, init_std, alpha = (TrainParam() & key).fetch1('learning_rate', 'dropout', 'init_std', 'smoothness')
-        lr, dropout, init_std, alpha = float(lr), float(dropout), float(init_std), float(alpha)
+        init_lr = 0.03
+        alpha = 30  # 3e-2 #7e-3 #1e-3
+        init_std = 0.001
+        dropout = 0.5
+        h1, h2 = 600, 600
+        seed = 8
 
-        ## train the network
-        set_seed(key['train_seed'])
-        net = Net(n_output=bin_counts, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
         net.cuda()
         loss = nn.CrossEntropyLoss().cuda()
 
-        learning_rates = lr * 3.0**(-np.arange(4))
+        net.std = 1e-3
+        set_seed(seed)
+        net.initialize()
+
+        learning_rates = init_lr * 3.0 ** (-np.arange(4))
+
         for lr in learning_rates:
             print('\n\n\n\n LEARNING RATE: {}'.format(lr))
             optimizer = torch.optim.SGD(net.parameters(), lr=lr)
-            for epoch, valid_score in early_stopping(net, objective, interval=20, start=100, patience=20, max_iter=300000, maximize=False):
+            for epoch, valid_score in early_stopping(net, objective, interval=20, start=100, patience=20,
+                                                     max_iter=300000, maximize=False):
                 data_loader = DataLoader(train_dataset, shuffle=True, batch_size=128)
                 for x_, t_ in data_loader:
                     x, t = Variable(x_).cuda(), Variable(t_).cuda()
@@ -285,23 +292,24 @@ class CVTrainedModel(dj.Computed):
                     post = y + prior
                     val, _ = post.max(1, keepdim=True)
                     post = post - val
-                    #sparcity = y.abs().sum(1).mean()
-                    conv_filter = Variable(torch.from_numpy(np.array([-0.25, 0.5, -0.25])[None, None, :]).type(y.data.type()))
+                    conv_filter = Variable(
+                        torch.from_numpy(np.array([-0.25, 0.5, -0.25])[None, None, :]).type(y.data.type()))
                     smoothness = nn.functional.conv1d(y.unsqueeze(1), conv_filter).pow(2).mean()
                     score = loss(post, t)
                     score = score + alpha * smoothness
                     score.backward()
                     optimizer.step()
-                # if epoch % 10 == 0:
-                #     print('Score: {}'.format(score.data.cpu().numpy()[0]))
+                if epoch % 10 == 0:
+                    print('Score: {}'.format(score.data.cpu().numpy()[0]))
+                    # scheduler.step()
 
-
+        print('Evaluating...')
         net.eval()
 
-        key['cnn_trainset_score'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
-        key['cnn_testset_score'] = objective(net, x=test_x, t=test_t)
+        key['cnn_train_score'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        key['cnn_valid_score'] = objective(net, x=valid_x, t=valid_t)
 
-        y = net(test_x)
+        y = net(valid_x)
         yd = y.data.cpu().numpy()
         yd = np.exp(yd)
         yd = yd / yd.sum(axis=1, keepdims=True)
