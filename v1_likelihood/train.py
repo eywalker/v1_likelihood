@@ -172,7 +172,8 @@ class ModelDesign(dj.Lookup):
     hidden2:  int      # size of second hidden layer
     """
     contents = [(list_hash(x),) + x for x in [
-        (600, 600)
+        (600, 600),
+        (800, 800)
     ]]
 
 
@@ -187,10 +188,10 @@ class TrainParam(dj.Lookup):
     smoothness:     float     # regularizer on Laplace smoothness
     """
     contents = [(list_hash(x), ) + x for x in product(
-        (0.03,),     # learning rate
+        (0.03, 0.6),     # learning rate
         (0.5,),      # dropout rate
         (0.001,),    # initialization std
-        (30,)  # smoothness
+        (3, 30, 300)  # smoothness
     )]
 
 @schema
