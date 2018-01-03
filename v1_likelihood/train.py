@@ -211,6 +211,25 @@ class CVTrainedModel(dj.Computed):
     model: longblob      # trained model
     """
 
+    def load_model(self, key=None):
+        if key is None:
+            key = {}
+
+        rel = self & key
+
+        state_dict = rel.fetch1('model')
+        state_dict = {k: torch.from_numpy(state_dict[k][0]) for k in state_dict.dtype.names}
+
+        init_std = float((TrainParam() & key).fetch1('init_std'))
+        dropout = float((TrainParam() & key).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (ModelDesign() & rel).fetch1('hidden1', 'hidden2')]
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net.load_state_dict(state_dict)
+        return net
+
+
     def _make_tuples(self, key):
         print('Working!')
 
