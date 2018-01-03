@@ -229,17 +229,14 @@ class CVTrainedModel(dj.Computed):
         net.load_state_dict(state_dict)
         return net
 
-
-    def _make_tuples(self, key):
-        print('Working!')
+    def get_dataset(self, key=None):
+        if key is None:
+            key = self.fetch1(dj.key)
 
         train_set, valid_set = (CVSet() & key).fetch_datasets()
         bin_width = float((BinConfig() & key).fetch1('bin_width'))
         bin_counts = int((BinConfig() & key).fetch1('bin_counts'))
         clip_outside = bool((BinConfig() & key).fetch1('clip_outside'))
-
-        delta = bin_width
-        nbins = bin_counts
 
         train_counts, train_ori = np.concatenate(train_set['counts'], 1).T, train_set['orientation']
         valid_counts, valid_ori = np.concatenate(valid_set['counts'], 1).T, valid_set['orientation']
@@ -255,17 +252,32 @@ class CVTrainedModel(dj.Computed):
         valid_counts = valid_counts[good_pos]
         valid_ori = valid_bins[good_pos]
 
+        train_x = torch.Tensor(train_counts)
+        train_t = torch.Tensor(train_ori).type(torch.LongTensor)
+
+        valid_x = Variable(torch.Tensor(valid_counts))
+        valid_t = Variable(torch.Tensor(valid_ori).type(torch.LongTensor))
+
+        return train_x, train_t, valid_x, valid_t
+
+
+    def _make_tuples(self, key):
+        print('Working!')
+
+        #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
+
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
         sigmaA = 3
         sigmaB = 15
         pv = (np.arange(nbins) - nbins // 2) * delta
         prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
         prior = Variable(torch.from_numpy(prior)).cuda().float()
 
-        train_x = torch.Tensor(train_counts)
-        train_t = torch.Tensor(train_ori).type(torch.LongTensor)
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
 
-        valid_x = Variable(torch.Tensor(valid_counts)).cuda()
-        valid_t = Variable(torch.Tensor(valid_ori).type(torch.LongTensor)).cuda()
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
 
         train_dataset = TensorDataset(train_x, train_t)
         valid_dataset = TensorDataset(valid_x, valid_t)
