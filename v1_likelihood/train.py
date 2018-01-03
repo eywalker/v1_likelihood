@@ -220,10 +220,10 @@ class CVTrainedModel(dj.Computed):
         state_dict = rel.fetch1('model')
         state_dict = {k: torch.from_numpy(state_dict[k][0]) for k in state_dict.dtype.names}
 
-        init_std = float((TrainParam() & key).fetch1('init_std'))
-        dropout = float((TrainParam() & key).fetch1('dropout'))
+        init_std = float((TrainParam() & rel).fetch1('init_std'))
+        dropout = float((TrainParam() & rel).fetch1('dropout'))
         h1, h2 = [int(x) for x in (ModelDesign() & rel).fetch1('hidden1', 'hidden2')]
-        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+        nbins = int((BinConfig() & rel).fetch1('bin_counts'))
 
         net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
         net.load_state_dict(state_dict)
