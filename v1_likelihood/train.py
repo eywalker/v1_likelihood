@@ -368,6 +368,7 @@ class BestModel(dj.Computed):
     model: longblob      # trained model
     """
 
+    @property
     def key_source(self):
         return CVSet()
 
