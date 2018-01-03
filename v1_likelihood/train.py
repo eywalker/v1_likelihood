@@ -357,6 +357,28 @@ class CVTrainedModel(dj.Computed):
 
         self.insert1(key)
 
+@schema
+class BestModel(dj.Computed):
+    definition = """
+    -> CVTrainedModel
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    model: longblob      # trained model
+    """
+
+    def key_source(self):
+        return CVSet()
+
+    def _make_tuples(self, key):
+        targets = CVTrainedModel() * ModelDesign() & key
+        best = targets & CVSet().aggr(targets, cnn_valid_score='min(cnn_valid_score)')
+
+        best_model = best.fetch(dj.key, order_by='hidden1 DESC')[0]
+
+        tuple = (CVTrainedModel() & best_model).fetch1(as_dict=True)
+        self.insert1(tuple)
 
 
 # saving state dict {k: v.cpu().numpy() for k, v in model.state_dict().items()})
