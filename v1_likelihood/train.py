@@ -378,8 +378,7 @@ class BestModel(dj.Computed):
 
         best_model = best.fetch(dj.key, order_by='hidden1 DESC')[0]
 
-        tuple = (CVTrainedModel() & best_model).fetch1()
-        self.insert1(tuple)
+        self.insert(CVTrainedModel() & best_model)
 
 
 # saving state dict {k: v.cpu().numpy() for k, v in model.state_dict().items()})
