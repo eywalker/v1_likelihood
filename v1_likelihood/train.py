@@ -10,6 +10,7 @@ from numpy.linalg import inv
 from .models import Net
 from .utils import list_hash, set_seed
 from itertools import chain, product, count
+from tqdm import tqdm
 
 from .cd_dataset import CleanContrastSessionDataSet
 
@@ -108,6 +109,86 @@ class BinConfig(dj.Lookup):
 
 def mse(y, t):
     return np.sqrt(np.mean((y - t)**2))
+
+
+def kernel(x, y, sigma):
+    return torch.exp(-(x.unsqueeze(1) - y.unsqueeze(0)).pow(2).sum(-1) / 2 / sigma**2)
+
+
+class KernelReg:
+    def __init__(self, lam=0.01, sigma=300):
+        self.sigma = sigma
+        self.lam = lam
+        self.alpha = None
+        self.mu = None
+        self.x_train = None
+
+    def fit(self, x, y):
+        self.mu = x.mean(0, keepdim=True)
+        xc = x - self.mu
+        self.x_train = xc
+        K = kernel(xc, xc, self.sigma)
+        reg = torch.eye(K.size(0)) * self.lam
+        reg = reg.type(K.type())
+        self.alpha = torch.inverse(K + reg) @ y
+
+    def __call__(self, x):
+        return kernel(x - self.mu, self.x_train, self.sigma) @ self.alpha
+
+    def rmse(self, x, y):
+        yhat = self(x)
+        return np.sqrt((yhat - y).pow(2).mean())
+
+@schema
+class KernelRegression(dj.Computed):
+    definition = """
+    -> CVSet
+    ---
+    kr_lambda: float         # optimal lambda
+    kr_sigma: float          # optimal sigma
+    kr_alpha: longblob       # learned kernel weight
+    kr_mu: longblob          # mean of training samples
+    kr_trainset_score: float # score on trainset
+    kr_testset_score: float  # score on testset
+    """
+    def _make_tuples(self, key):
+        train_set, test_set = (CVSet() & key).fetch_datasets()
+        train_counts, train_ori = np.concatenate(train_set['counts'], 1).T, train_set['orientation']-270
+        test_counts, test_ori = np.concatenate(test_set['counts'], 1).T, test_set['orientation']-270
+
+        train_counts = torch.Tensor(train_counts).cuda()
+        train_ori = torch.Tensor(train_ori).cuda()
+        test_counts = torch.Tensor(test_counts).cuda()
+        test_ori = torch.Tensor(test_ori).cuda()
+
+        kr = KernelReg()
+        lams = 10.0 ** np.arange(-3, 4)
+        sigmas = np.logspace(-1, 3, 300)
+        rmse = np.empty((len(lams), len(sigmas)))
+        for (i, l), (j, s) in tqdm(product(enumerate(lams), enumerate(sigmas))):
+            kr.sigma = s
+            kr.lam = l
+            kr.fit(train_counts, train_ori)
+            rmse[i, j] = kr.rmse(test_counts, test_ori)
+
+        lmin_pos, smin_pos = np.where(rmse == rmse.min())
+        lam = lams[lmin_pos[0]]
+        sigma = sigmas[smin_pos[0]]
+
+        kr.lam = lam
+        kr.sigma = sigma
+        kr.fit(train_counts, train_ori)
+        train_score = kr.rmse(train_counts, train_ori)
+        test_score = kr.rmse(test_counts, test_ori)
+
+        key['kr_lambda'] = lam
+        key['kr_sigma'] = sigma
+        key['kr_alpha'] = kr.alpha.cpu().numpy()
+        key['kr_mu'] = kr.mu.cpu().numpy()
+        key['kr_trainset_score'] = train_score
+        key['kr_testset_score'] = test_score
+
+        self.insert1(key)
 
 
 @schema
@@ -262,8 +343,6 @@ class CVTrainedModel(dj.Computed):
 
 
     def _make_tuples(self, key):
-        print('Working!')
-
         #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
 
         delta = float((BinConfig() & key).fetch1('bin_width'))
@@ -280,7 +359,7 @@ class CVTrainedModel(dj.Computed):
         valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
 
         train_dataset = TensorDataset(train_x, train_t)
-        valid_dataset = TensorDataset(valid_x, valid_t)
+        #valid_dataset = TensorDataset(valid_x, valid_t)
 
         def objective(net, x=None, t=None):
             if x is None and t is None:

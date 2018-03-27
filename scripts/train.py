@@ -5,3 +5,4 @@ import datajoint as dj
 train.CVSet().populate(order='random', reserve_jobs=True)
 train.LinearRegression().populate(order='random', reserve_jobs=True)
 train.CVTrainedModel().populate(order='random', reserve_jobs=True)
+train.KernelRegression().populate(order='random', reserve_jobs=True)
