@@ -22,6 +22,25 @@ def extend_ones(x):
 
 
 def binnify(x, center=270, delta=1, nbins=61, clip=True):
+    """
+    Bin the dat into bins, with center bin at `center`. Each bin has width `delta`
+    and you will have equal number of bins to the left and to the right of the center bin.
+    The left most bin starts at bin number and the last bin at `nbins`-1. If `clip`=True,
+    then data falling out of the bins would be assigned bin number `-1` to indicate that it
+    is out of the range. Otherwise, the data would be assigned to the nearest edge bin. A data point
+    x would fall into bin i if  bin_i_left <= x < bin_i_right
+
+    Args:
+        x: data to bin
+        center: center of the bins
+        delta: width of each bin
+        nbins: number of bins
+        clip: whether to clip data falling out of bin range. Defaults to True
+
+    Returns:
+        (xv, p) - xv is an array of bin centers and thus has length nbins. p is the bin assignment of
+            each data point in x and thus len(p) == len(x).
+    """
     p = np.round((x - center) / delta) + (nbins // 2)
     if clip:
         out = (p < 0) | (p >= nbins)
@@ -59,6 +78,9 @@ class CVConfig(dj.Lookup):
 
 @schema
 class CVSet(dj.Computed):
+    """
+    Separates the CV set into the training and the test sets.
+    """
     definition = """
     -> CleanContrastSessionDataSet
     -> CVSeed
@@ -83,7 +105,7 @@ class CVSet(dj.Computed):
         self.insert1(key)
 
     def fetch_datasets(self):
-        assert len(self)==1, 'Only can fetch one dataset at a time'
+        assert len(self) == 1, 'Only can fetch one dataset at a time'
         dataset = (CleanContrastSessionDataSet() & self).fetch_dataset()
         train_index, test_index = self.fetch1('train_index', 'test_index')
         train_set = dataset[train_index]
@@ -109,6 +131,7 @@ class BinConfig(dj.Lookup):
 
 def mse(y, t):
     return np.sqrt(np.mean((y - t)**2))
+
 
 
 def kernel(x, y, sigma):
@@ -271,9 +294,9 @@ class TrainParam(dj.Lookup):
     smoothness:     float     # regularizer on Laplace smoothness
     """
     contents = [(list_hash(x), ) + x for x in product(
-        (0.03, 0.6),     # learning rate
+        (0.01, 0.03, 0.6),     # learning rate
         (0.5, 0.9, 0.99),      # dropout rate
-        (0.001, 0.0001),    # initialization std
+        (0.01, 0.001, 0.0001),    # initialization std
         (3, 30, 300, 3000, 30000)  # smoothness
     )]
 
@@ -426,8 +449,183 @@ class CVTrainedModel(dj.Computed):
         yd = yd / yd.sum(axis=1, keepdims=True)
 
         loc = yd.argmax(axis=1)
-        ds = (np.arange(bin_counts) - loc[:, None]) ** 2
-        avg_sigma = np.mean(np.sqrt(np.sum(yd * ds, axis=1))) * bin_width
+        ds = (np.arange(nbins) - loc[:, None]) ** 2
+        avg_sigma = np.mean(np.sqrt(np.sum(yd * ds, axis=1))) * delta
+        if np.isnan(avg_sigma):
+          avg_sigma = -1
+
+        key['avg_sigma'] = avg_sigma
+        key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+
+        self.insert1(key)
+
+def mean_post(lp):
+    nbins = lp.size(1)
+    v = lp - lp.max(dim=1, keepdim=True)[0]
+    post = torch.exp(v)
+    ro_pos = Variable(torch.arange(nbins).type(post.data.type()))
+    return (ro_pos*post).sum(dim=1) / post.sum(dim=1)
+
+def stat_logp(lp):
+    nbins = lp.size(1)
+    v = lp - lp.max(dim=1, keepdim=True)[0]
+    post = torch.exp(v)
+    ro_pos = Variable(torch.arange(nbins).type(post.data.type()))
+    mu = (ro_pos*post).sum(dim=1, keepdim=True) / post.sum(dim=1, keepdim=True)
+    sigma = torch.sqrt(((ro_pos - mu).pow(2)*post).sum(dim=1, keepdim=True) / post.sum(dim=1, keepdim=True))
+    return mu, sigma
+
+
+@schema
+class CVTrainedModel2(dj.Computed):
+    """
+    Same thing as CVTrainedModel but using the mean of posterior instead of the maximum a posteriori
+    when assessing the score.
+    """
+    definition = """
+    -> CVSet
+    -> BinConfig
+    -> ModelDesign
+    -> TrainParam
+    -> TrainSeed
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    model: longblob      # trained model
+    """
+
+    def load_model(self, key=None):
+        if key is None:
+            key = {}
+
+        rel = self & key
+
+        state_dict = rel.fetch1('model')
+        state_dict = {k: torch.from_numpy(state_dict[k][0]) for k in state_dict.dtype.names}
+
+        init_std = float((TrainParam() & rel).fetch1('init_std'))
+        dropout = float((TrainParam() & rel).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (ModelDesign() & rel).fetch1('hidden1', 'hidden2')]
+        nbins = int((BinConfig() & rel).fetch1('bin_counts'))
+
+        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net.load_state_dict(state_dict)
+        return net
+
+    def get_dataset(self, key=None):
+        if key is None:
+            key = self.fetch1(dj.key)
+
+        train_set, valid_set = (CVSet() & key).fetch_datasets()
+        bin_width = float((BinConfig() & key).fetch1('bin_width'))
+        bin_counts = int((BinConfig() & key).fetch1('bin_counts'))
+        clip_outside = bool((BinConfig() & key).fetch1('clip_outside'))
+
+        train_counts, train_ori = np.concatenate(train_set['counts'], 1).T, train_set['orientation']
+        valid_counts, valid_ori = np.concatenate(valid_set['counts'], 1).T, valid_set['orientation']
+
+        xv, train_bins = binnify(train_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+        _, valid_bins = binnify(valid_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+
+        good_pos = train_bins >= 0
+        train_counts = train_counts[good_pos]
+        train_ori = train_bins[good_pos]
+
+        good_pos = valid_bins >= 0
+        valid_counts = valid_counts[good_pos]
+        valid_ori = valid_bins[good_pos]
+
+        train_x = torch.Tensor(train_counts)
+        train_t = torch.Tensor(train_ori).type(torch.LongTensor)
+
+        valid_x = Variable(torch.Tensor(valid_counts))
+        valid_t = Variable(torch.Tensor(valid_ori).type(torch.LongTensor))
+
+        return train_x, train_t, valid_x, valid_t
+
+
+    def _make_tuples(self, key):
+        #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
+
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        train_dataset = TensorDataset(train_x, train_t)
+        #valid_dataset = TensorDataset(valid_x, valid_t)
+
+        def objective(net, x=None, t=None):
+            if x is None and t is None:
+                x = valid_x
+                t = valid_t
+            net.eval()
+            y = net(x)
+            posterior = y + prior
+            # _, loc = torch.max(posterior, dim=1)
+            loc, _ = stat_logp(posterior)
+            v = (t.double() - loc.double()).pow(2).mean().sqrt() * delta
+            return v.data.cpu().numpy()[0]
+
+        init_lr = float((TrainParam() & key).fetch1('learning_rate'))
+        alpha = float((TrainParam() & key).fetch1('smoothness'))
+        init_std = float((TrainParam() & key).fetch1('init_std'))
+        dropout = float((TrainParam() & key).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (ModelDesign() & key).fetch1('hidden1', 'hidden2')]
+        seed = key['train_seed']
+
+        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net.cuda()
+        loss = nn.CrossEntropyLoss().cuda()
+
+        net.std = init_std
+        set_seed(seed)
+        net.initialize()
+
+        learning_rates = init_lr * 3.0 ** (-np.arange(4))
+
+        for lr in learning_rates:
+            print('\n\n\n\n LEARNING RATE: {}'.format(lr))
+            optimizer = torch.optim.SGD(net.parameters(), lr=lr)
+            for epoch, valid_score in early_stopping(net, objective, interval=20, start=100, patience=20,
+                                                     max_iter=300000, maximize=False):
+                data_loader = DataLoader(train_dataset, shuffle=True, batch_size=128)
+                for x_, t_ in data_loader:
+                    x, t = Variable(x_).cuda(), Variable(t_).cuda()
+                    net.train()
+                    optimizer.zero_grad()
+                    y = net(x)
+                    post = y + prior
+                    val, _ = post.max(1, keepdim=True)
+                    post = post - val
+                    conv_filter = Variable(
+                        torch.from_numpy(np.array([-0.25, 0.5, -0.25])[None, None, :]).type(y.data.type()))
+                    smoothness = nn.functional.conv1d(y.unsqueeze(1), conv_filter).pow(2).mean()
+                    score = loss(post, t)
+                    score = score + alpha * smoothness
+                    score.backward()
+                    optimizer.step()
+                if epoch % 10 == 0:
+                    print('Score: {}'.format(score.data.cpu().numpy()[0]))
+
+        print('Evaluating...')
+        net.eval()
+
+        key['cnn_train_score'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        key['cnn_valid_score'] = objective(net, x=valid_x, t=valid_t)
+
+        y = net(valid_x)
+        _, sigmas = stat_logp(y)
+        avg_sigma = sigmas.data.cpu().numpy().mean() * delta
         if np.isnan(avg_sigma):
           avg_sigma = -1
 
@@ -455,6 +653,7 @@ class BestModel(dj.Computed):
         targets = CVTrainedModel() * ModelDesign() & key
         best = targets & CVSet().aggr(targets, cnn_valid_score='min(cnn_valid_score)')
 
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
         best_model = best.fetch(dj.key, order_by='hidden1 DESC')[0]
 
         self.insert(CVTrainedModel() & best_model)
