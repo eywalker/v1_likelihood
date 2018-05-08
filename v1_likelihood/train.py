@@ -474,6 +474,7 @@ def mean_post(lp):
     ro_pos = Variable(torch.arange(nbins).type(post.data.type()))
     return (ro_pos*post).sum(dim=1) / post.sum(dim=1)
 
+
 def stat_logp(lp):
     nbins = lp.size(1)
     v = lp - lp.max(dim=1, keepdim=True)[0]

@@ -16,6 +16,7 @@ services:
       - ../attorch:/src/attorch
       - ../v1_likelihood:/src/v1_likelihood
       - /mnt/lab/users/eywalker/data:/data
+      - /mnt/lab/users/eywalker/v1_project/data:/v1_data
     environment:
       - DISPLAY=$DISPLAY
   {% endfor %}
