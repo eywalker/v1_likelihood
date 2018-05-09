@@ -3,6 +3,37 @@ from numpy.linalg import inv
 import hashlib
 import random
 import torch
+from collections import namedtuple
+
+
+def bin_loc(x, bin_edges, clip=True, include_edge=True):
+    assign = np.digitize(x, bin_edges)
+    if clip and include_edge:
+        assign[x == bin_edges[-1]] = len(bin_edges) - 1
+    assign_matrix = np.empty((len(bin_edges) + 1, len(x)))
+    assign_matrix.fill(np.nan)
+    assign_matrix[np.arange(len(bin_edges) + 1)[:, None] == assign] = 1
+    if clip:
+        assign_matrix = assign_matrix[1:-1, :]
+    return assign_matrix
+
+
+def binned_group(x, bin_edges, *args, **kwargs):
+    assign = bin_loc(x, bin_edges, *args, **kwargs)
+    return list(np.where(r == 1) for r in assign)
+
+
+Stats = namedtuple('stats', ('binc', 'mu', 'sigma', 'n', 'sem'))
+
+
+def binned_stats(x, y, bin_edges, clip=True):
+    assign = bin_loc(x, bin_edges, clip=clip)
+    binc = 0.5 * (bin_edges[1:] + bin_edges[:-1])
+    mus = np.nanmean(assign * y, axis=1)
+    ns = np.nansum(assign, axis=1)
+    stds = np.nanstd(assign * y, axis=1)
+    sem = stds / np.sqrt(ns)
+    return Stats(binc, mus, stds, ns, sem)
 
 
 def extend_ones(x):
