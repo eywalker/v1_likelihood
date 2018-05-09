@@ -20,6 +20,7 @@ class LikelihoodStats(dj.Computed):
     orientation: longblob
     mu_likelihood: longblob
     sigma_likelihood: longblob
+    mean_sigma: float
     """
 
     def make(self, key):
@@ -38,5 +39,6 @@ class LikelihoodStats(dj.Computed):
         key['orientation'] = ori
         key['mu_likelihood'] = mu_L
         key['sigma_likelihood'] = sigma_L
+        key['mean_sigma'] = sigma_L.mean()
 
         self.insert1(key)
