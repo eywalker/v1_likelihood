@@ -124,7 +124,8 @@ class BinConfig(dj.Lookup):
     """
     contents = [
         (list_hash(x),) + x for x in [
-            (1.0, 61, True)
+            (1.0, 61, True),
+            (1.0, 81, False)
         ]
     ]
 
