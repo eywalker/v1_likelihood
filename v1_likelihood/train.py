@@ -396,7 +396,11 @@ class CVTrainedModel(dj.Computed):
                     post = post - val
                     conv_filter = Variable(
                         torch.from_numpy(np.array([-0.25, 0.5, -0.25])[None, None, :]).type(y.data.type()))
-                    smoothness = nn.functional.conv1d(y.unsqueeze(1), conv_filter).pow(2).mean()
+                    try:
+                        smoothness = nn.functional.conv1d(y.unsqueeze(1), conv_filter).pow(2).mean()
+                    except:
+                        # if smoothness computation overflows, then don't bother with it
+                        smoothness = 0
                     score = loss(post, t)
                     score = score + alpha * smoothness
                     score.backward()
