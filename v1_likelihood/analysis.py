@@ -21,6 +21,7 @@ class LikelihoodStats(dj.Computed):
     mu_likelihood: longblob
     sigma_likelihood: longblob
     mean_sigma: float
+    max_ori: longblob
     """
 
     def make(self, key):
@@ -35,10 +36,14 @@ class LikelihoodStats(dj.Computed):
         mu_L = (s * L).sum(axis=0) / L.sum(axis=0)
         sigma_L = np.sqrt((s ** 2 * L).sum(axis=0) / L.sum(axis=0) - mu_L ** 2)
 
-        key['contrasts'] = cont
-        key['orientation'] = ori
-        key['mu_likelihood'] = mu_L
-        key['sigma_likelihood'] = sigma_L
+        max_pos = np.argmax(L, axis=0)
+        max_ori = s[max_pos].squeeze()
+
+        key['contrasts'] = cont.squeeze()
+        key['orientation'] = ori.squeeze()
+        key['mu_likelihood'] = mu_L.squeeze()
+        key['max_ori'] = max_ori
+        key['sigma_likelihood'] = sigma_L.squeeze()
         key['mean_sigma'] = sigma_L.mean()
 
         self.insert1(key)
