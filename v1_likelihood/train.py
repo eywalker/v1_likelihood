@@ -596,7 +596,7 @@ class RefinedCVTrainedModel(dj.Computed):
                     print('Score: {}'.format(score.data.cpu().numpy()[0]))
                     # scheduler.step()
 
-    def _make_tuples(self, key):
+    def make(self, key):
         #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
 
         delta = float((BinConfig() & key).fetch1('bin_width'))
@@ -914,29 +914,111 @@ def stat_logp(lp):
 
 
 
-# @schema
-# class BestModel(dj.Computed):
-#     definition = """
-#     -> CVTrainedModel
-#     ---
-#     cnn_train_score: float   # score on train set
-#     cnn_valid_score:  float   # score on test set
-#     avg_sigma:   float   # average width of the likelihood functions
-#     model: longblob      # trained model
-#     """
-#
-#     @property
-#     def key_source(self):
-#         return CVSet()
-#
-#     def _make_tuples(self, key):
-#         targets = CVTrainedModel() * ModelDesign() & key
-#         best = targets & CVSet().aggr(targets, cnn_valid_score='min(cnn_valid_score)')
-#
-#         # if duplicate score happens to occur, pick the model with the largest hidden layer
-#         best_model = best.fetch(dj.key, order_by='hidden1 DESC')[0]
-#
-#         self.insert(CVTrainedModel() & best_model)
+@schema
+class BestRefinedModel(dj.Computed):
+    definition = """
+    -> RefinedCVTrainedModel
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    """
+
+    @property
+    def key_source(self):
+        return CVSet() * BinConfig()
+
+    def get_best(self, key):
+        targets = RefinedCVTrainedModel() * ModelDesign & key
+        best = targets * CVSet().aggr(targets, max_value='min(cnn_valid_score)') & 'cnn_valid_score = max_value'
+        return best
+
+    def make(self, key):
+        best = self.get_best(key)
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
+        best_model = best.fetch(dj.key, order_by='hidden1 DESC')[0]
+
+        self.insert(RefinedCVTrainedModel() & best_model)
+
+
+@schema
+class BestRecoveredModel(RefinedCVTrainedModel):
+    definition = """
+    -> BestRefinedModel
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
+    cnn_target_train_score: float # score expected on train set
+    cnn_target_valid_score: float # score expected on the validation set
+    avg_sigma:   float   # average width of the likelihood functions
+    model: longblob      # trained model
+    """
+
+    def make(self, key):
+        #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
+
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        train_dataset = TensorDataset(train_x, train_t)
+
+        objective = self.make_objective(valid_x, valid_t, prior, delta)
+
+        init_lr = float((TrainParam() & key).fetch1('learning_rate'))
+        alpha = float((TrainParam() & key).fetch1('smoothness'))
+        init_std = float((TrainParam() & key).fetch1('init_std'))
+        dropout = float((TrainParam() & key).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (ModelDesign() & key).fetch1('hidden1', 'hidden2')]
+        seed = key['train_seed']
+
+        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net.cuda()
+        loss = nn.CrossEntropyLoss().cuda()
+
+        net.std = init_std
+        set_seed(seed)
+        net.initialize()
+
+        self.train(net, loss, objective, train_dataset, prior, alpha, init_lr)
+
+        print('Evaluating...')
+        net.eval()
+
+        target_train, target_valid = (RefinedCVTrainedModel & key).fetch1('cnn_train_score', 'cnn_valid_score')
+        key['cnn_target_train_score'] = target_train
+        key['cnn_target_valid_score'] = target_valid
+
+        key['cnn_train_score'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        key['cnn_valid_score'] = objective(net, x=valid_x, t=valid_t)
+
+        y = net(valid_x)
+        yd = y.data.cpu().numpy()
+        yd = np.exp(yd)
+        yd = yd / yd.sum(axis=1, keepdims=True)
+
+        loc = yd.argmax(axis=1)
+        ds = (np.arange(nbins) - loc[:, None]) ** 2
+        avg_sigma = np.mean(np.sqrt(np.sum(yd * ds, axis=1))) * delta
+        if np.isnan(avg_sigma):
+          avg_sigma = -1
+
+        key['avg_sigma'] = avg_sigma
+        key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+
+
+
+        self.insert1(key)
+
 
 
 @schema
