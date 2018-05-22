@@ -6,6 +6,9 @@ import datajoint as dj
 restr = train.BinConfig & 'bin_counts = 91'
 train.LinearRegression().populate(order='random', reserve_jobs=True)
 analysis.LikelihoodStats.populate(order='random', reserve_jobs=True)
-train.RefinedCVTrainedModel().populate(restr, order='random', reserve_jobs=True)
+#train.RefinedCVTrainedModel().populate(restr, order='random', reserve_jobs=True)
+
+train.BestRecoveredModel().populate(restr, order='random', reserve_jobs=True)
+
 #train.KernelRegression().populate(order='random', reserve_jobs=True)
 #train.CVTrainedModel3().populate(order='random', reserve_jobs=True, suppress_errors=True)
