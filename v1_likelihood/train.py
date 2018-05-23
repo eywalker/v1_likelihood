@@ -596,6 +596,39 @@ class RefinedCVTrainedModel(dj.Computed):
                     print('Score: {}'.format(score.data.cpu().numpy()[0]))
                     # scheduler.step()
 
+    def test_model(self, key=None):
+        if key is None:
+            key = self.fetch1('KEY')
+
+        net = self.load_model(key)
+        net.cuda()
+        net.eval()
+
+        objective = self.prepare_objective(key)
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+        train_score = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        valid_score = objective(net, x=valid_x, t=valid_t)
+        return train_score, valid_score
+
+
+    def prepare_objective(self, key):
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        return self.make_objective(valid_x, valid_t, prior, delta)
+
+
     def make(self, key):
         #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
 
