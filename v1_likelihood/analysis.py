@@ -1,6 +1,7 @@
 import datajoint as dj
 import numpy as np
 from scipy.io import loadmat
+from scipy.interpolate import interp1d
 
 cd_dataset = dj.create_virtual_module('cd_dataset', 'edgar_cd_dataset')
 class_discrimination = dj.create_virtual_module('class_discrimination', 'edgar_class_discrimination')
@@ -47,3 +48,63 @@ class LikelihoodStats(dj.Computed):
         key['mean_sigma'] = sigma_L.mean()
 
         self.insert1(key)
+
+
+@schema
+class SummaryBinConfig(dj.Lookup):
+    definition = """
+    summary_bin_id: int
+    ---
+    bin_extent: float
+    nbins: int
+    """
+    contents = [
+        (0, 50, 101)
+    ]
+
+
+@schema
+class LikelihoodSummary(dj.Computed):
+    definition = """
+    -> cd_dlset.DLSetInfo
+    -> SummaryBinConfig
+    ---
+    contrast: float
+    samples: longblob
+    likelihoods: longblob
+    centered_likelihoods: longblob
+    """
+
+    def make(self, key):
+        bin_extent, nbins = (SummaryBinConfig & key).fetch1('bin_extent', 'nbins')
+        samples = np.linspace(-bin_extent, bin_extent, nbins)
+
+        path = (cd_dlset.DLSetInfo & key).fetch1('dataset_path')
+        data = loadmat(path)['dataSet'][0, 0]
+
+        conts = data['contrast'].squeeze()
+        assert np.all(conts == conts[0]), 'More than one contrast present!'
+        contrast = conts[0]
+        s = data['decodeOri'].squeeze() - 270
+        Ls = data['likelihood'].T # trials x decodeOri
+        oris = data['orientation'].squeeze() - 270
+
+        likelihoods = []
+        centered_likelihoods = []
+        for L, ori in zip(Ls, oris):
+            f = interp1d(s, L, kind='quadratic', bounds_error=False, fill_value=0)
+            likelihoods.append(f(samples))
+            centered_likelihoods.append(f(samples + ori))
+
+        likelihoods = np.stack(likelihoods)
+        centered_likelihoods = np.stack(centered_likelihoods)
+
+        key['contrast'] = contrast
+        key['samples'] = samples
+        key['likelihoods'] = likelihoods
+        key['centered_likelihoods'] = centered_likelihoods
+
+        self.insert1(key)
+
+
+
