@@ -80,7 +80,7 @@ class LikelihoodSummary(dj.Computed):
     def make(self, key):
         bin_extent, nbins = (SummaryBinConfig & key).fetch1('bin_extent', 'nbins')
         samples = np.linspace(-bin_extent, bin_extent, nbins)
-        mu_ori, max_ori = (LikelihoodStats & key).fetch1('mu_likelihood', 'max_ori')
+        mu_oris, max_oris = (LikelihoodStats & key).fetch1('mu_likelihood', 'max_ori')
 
         path = (cd_dlset.DLSetInfo & key).fetch1('dataset_path')
         data = loadmat(path)['dataSet'][0, 0]
@@ -96,7 +96,7 @@ class LikelihoodSummary(dj.Computed):
         ori_centered_likelihoods = []
         mean_centered_likelihoods = []
         max_centered_likelihoods = []
-        for L, ori in zip(Ls, oris):
+        for L, ori, mu_ori, max_ori in zip(Ls, oris, mu_oris, max_oris):
             f = interp1d(s, L, kind='quadratic', bounds_error=False, fill_value=0)
             likelihoods.append(f(samples))
             ori_centered_likelihoods.append(f(samples + ori))
@@ -104,7 +104,9 @@ class LikelihoodSummary(dj.Computed):
             max_centered_likelihoods.append(f(samples + max_ori))
 
         likelihoods = np.stack(likelihoods)
-        centered_likelihoods = np.stack(centered_likelihoods)
+        ori_centered_likelihoods = np.stack(ori_centered_likelihoods)
+        mean_centered_likelihoods = np.stack(mean_centered_likelihoods)
+        max_centered_likelihoods = np.stack(max_centered_likelihoods)
 
         key['contrast'] = contrast
         key['samples'] = samples
