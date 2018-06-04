@@ -80,7 +80,7 @@ class LikelihoodSummary(dj.Computed):
     def make(self, key):
         bin_extent, nbins = (SummaryBinConfig & key).fetch1('bin_extent', 'nbins')
         samples = np.linspace(-bin_extent, bin_extent, nbins)
-        mu_oris, max_oris = (LikelihoodStats & key).fetch1('mu_likelihood', 'max_ori')
+        mu_oris, max_oris = [x - 270 for x in (LikelihoodStats & key).fetch1('mu_likelihood', 'max_ori')]
 
         path = (cd_dlset.DLSetInfo & key).fetch1('dataset_path')
         data = loadmat(path)['dataSet'][0, 0]
