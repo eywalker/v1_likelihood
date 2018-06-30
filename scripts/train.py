@@ -10,7 +10,7 @@ simulate_poisson.FitTuningCurves().populate(order='random', reserve_jobs=True)
 simulate_poisson.FittedPoissonScores().populate(order='random', reserve_jobs=True)
 simulate_poisson.FittedPoissonKL().populate(order='random', reserve_jobs=True)
 simulate_poisson.PoissonTrainedModel().populate(order='random', reserve_jobs=True)
-simulate_poisson.TrainedNetKL().populate(order='random', reserve_jobs=True)
+#simulate_poisson.TrainedNetKL().populate(order='random', reserve_jobs=True)
 
 
 # #train.CVSet().populate(order='random', reserve_jobs=True)
