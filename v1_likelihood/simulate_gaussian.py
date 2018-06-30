@@ -543,6 +543,110 @@ class FittedPoissonKL(dj.Computed):
 
         self.insert1(key)
 
+@schema
+class OptimalPoissonScores(dj.Computed):
+    definition = """
+    -> BinConfig
+    ---
+    fit_trainset_score: float 
+    fit_validset_score: float
+    fit_testset_score: float
+    """
+
+    def response_summary(self, key=None):
+        if key is None:
+            key = self.fetch1('KEY')
+
+        stim_keys = ['train', 'valid', 'test']
+
+        # this is the expected value of the spike counts for each stimulus
+        responses = (GaussianSimulation() & key).simulate_responses()
+
+        f = responses['mean_f']
+
+        for k in stim_keys:
+            resp_set = responses[k]
+            mus = f(resp_set['stimulus'])
+            counts = resp_set['counts']
+
+            def closure(counts):
+                def ll(decode_stim):
+                    mu_hat = f(decode_stim)[None, ...]  # 1 x units x dec_stim
+                    logl = (counts[..., None] * np.log(mu_hat)).sum(axis=1) - mu_hat.sum(axis=1)  # trials x dec_stim
+                    return logl
+
+                return ll
+
+            resp_set['expected_responses'] = mus
+            resp_set['logl_f'] = closure(counts)
+
+        return responses
+
+    def make(self, key):
+        resp = self.response_summary(key)
+
+        delta, nbins, clip_outside = (BinConfig() & key).fetch1('bin_width', 'bin_counts', 'clip_outside')
+        delta = float(delta)
+
+        sigmaA = 3
+        sigmaB = 15
+
+        set_types = ['train', 'valid', 'test']
+
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+
+        for st in set_types:
+            logl = resp[st]['logl_f'](pv)
+            ori = resp[st]['stimulus']
+            xv, ori_bins = binnify(ori, delta=delta, nbins=nbins, clip=clip_outside)
+
+            y = logl + prior
+            t_hat = np.argmax(y, 1)
+
+            key['fit_{}set_score'.format(st)] = np.sqrt(np.mean((t_hat.ravel() - ori_bins) ** 2)) * delta
+
+        self.insert1(key)
+
+
+@schema
+class OptimalPoissonKL(dj.Computed):
+    definition = """
+    -> OptimalPoissonScores
+    ---
+    fit_train_med_kl: float  # med KL
+    fit_valid_med_kl: float  # med KL
+    fit_test_med_kl: float  # med KL
+    fit_train_kl: longblob   # KL values
+    fit_valid_kl: longblob   # KL values
+    fit_test_kl: longblob   # KL values
+    """
+
+    def make(self, key):
+        gt_resp = (GaussianSimulation() & key).simulate_responses()
+        fit_resp = (OptimalPoissonScores() & key).response_summary()
+
+        delta, nbins, clip_outside = (BinConfig() & key).fetch1('bin_width', 'bin_counts', 'clip_outside')
+        delta = float(delta)
+        set_types = ['train', 'valid', 'test']
+        pv = (np.arange(nbins) - nbins // 2) * delta
+
+        for st in set_types:
+            gt_logl = gt_resp[st]['logl_f'](pv)
+            gt_nl = np.exp(gt_logl)
+            gt_nl = gt_nl / np.sum(gt_nl, axis=1, keepdims=True)
+
+            fit_logl = fit_resp[st]['logl_f'](pv)
+            fit_nl = np.exp(fit_logl)
+            fit_nl = fit_nl / np.sum(fit_nl, axis=1, keepdims=True)
+
+            eps = 1e-15
+            KL = ((np.log(gt_nl + eps) - np.log(fit_nl + eps)) * gt_nl).sum(axis=1)
+            key['fit_{}_med_kl'.format(st)] = np.median(KL)
+            key['fit_{}_kl'.format(st)] = KL
+
+        self.insert1(key)
+
 
 @schema
 class TrainSeed(dj.Lookup):
