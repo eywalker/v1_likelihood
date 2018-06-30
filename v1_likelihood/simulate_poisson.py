@@ -107,6 +107,15 @@ class GaussTuningSet(dj.Manual):
         key['widths'] = 21 * np.ones(key['n_cells'])
         self.insert1(key, skip_duplicates=True)
 
+        key = {
+            'tuning_set_id': 1,
+            'n_cells': 96,
+        }
+        key['centers'] = np.linspace(-40, 40, key['n_cells'])
+        key['amps'] = np.ones(key['n_cells'])
+        key['widths'] = 30 * np.ones(key['n_cells'])
+        self.insert1(key, skip_duplicates=True)
+
     def get_f(self, key=None):
         """
         Return a function that would return mean population response for stimuli.
