@@ -183,6 +183,8 @@ class CorrelationMatrix(dj.Computed):
         key['max_corr'] = np.abs(off_ss).max()
         key['corr_matrix'] = ss
 
+        self.insert1(key)
+
 
 def sample_normal(N, sigma):
     u, sv, ht = svd(sigma)
