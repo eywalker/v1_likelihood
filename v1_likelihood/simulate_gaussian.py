@@ -104,8 +104,8 @@ class GaussTuningSet(dj.Manual):
             'n_cells': 96,
         }
         key['centers'] = np.linspace(-40, 40, key['n_cells'])
-        key['amps'] = 6 * np.ones(key['n_cells'])
-        key['widths'] = 21 * np.ones(key['n_cells'])
+        key['amps'] = np.ones(key['n_cells'])
+        key['widths'] = 30 * np.ones(key['n_cells'])
 
 
         self.insert1(key, skip_duplicates=True)
@@ -542,6 +542,7 @@ class FittedPoissonKL(dj.Computed):
             key['fit_{}_kl'.format(st)] = KL
 
         self.insert1(key)
+
 
 @schema
 class OptimalPoissonScores(dj.Computed):

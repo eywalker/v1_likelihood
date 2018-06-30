@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from v1_likelihood import train, analysis, simulate_poisson
+from v1_likelihood import train, analysis, simulate_poisson, simulate_gaussian
 import datajoint as dj
 
 simulate_poisson.GaussTuningSet().fill()
@@ -10,6 +10,20 @@ simulate_poisson.FitTuningCurves().populate(order='random', reserve_jobs=True)
 simulate_poisson.FittedPoissonScores().populate(order='random', reserve_jobs=True)
 simulate_poisson.FittedPoissonKL().populate(order='random', reserve_jobs=True)
 simulate_poisson.PoissonTrainedModel().populate(order='random', reserve_jobs=True)
+
+
+simulate_gaussian.GaussTuningSet().fill()
+simulate_gaussian.CorrelationMatrix().populate(order='random', reserve_jobs=True)
+simulate_gaussian.GaussianSimulation().populate(order='random', reserve_jobs=True)
+simulate_gaussian.GTScores().populate(order='random', reserve_jobs=True)
+simulate_gaussian.LinearRegression().populate(order='random', reserve_jobs=True)
+simulate_gaussian.FitTuningCurves().populate(order='random', reserve_jobs=True)
+simulate_gaussian.FittedPoissonScores().populate(order='random', reserve_jobs=True)
+simulate_gaussian.FittedPoissonKL().populate(order='random', reserve_jobs=True)
+simulate_gaussian.OptimalPoissonScores().populate(order='random', reserve_jobs=True)
+simulate_gaussian.OptimalPoissonKL().populate(order='random', reserve_jobs=True)
+simulate_gaussian.GaussianTrainedModel().populate(order='random', reserve_jobs=True)
+
 #simulate_poisson.TrainedNetKL().populate(order='random', reserve_jobs=True)
 
 
