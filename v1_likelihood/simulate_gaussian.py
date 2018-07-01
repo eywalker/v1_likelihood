@@ -664,7 +664,7 @@ class TrainSeed(dj.Lookup):
     # training seed
     train_seed:   int       # training seed
     """
-    contents = zip((8, 92, 123))
+    contents = zip((8, 92, 123, 823))
 
 
 @schema
@@ -679,6 +679,7 @@ class ModelDesign(dj.Lookup):
         (400, 400),
         (600, 600),
         (800, 800),
+        (1000, 1000)
     ]]
 
 
@@ -694,9 +695,9 @@ class TrainParam(dj.Lookup):
     """
     contents = [(list_hash(x),) + x for x in product(
         (0.01, 0.03, 0.3),  # learning rate
-        (0.4, 0.5),  # dropout rate
+        (0.1, 0.4, 0.5, 0.9),  # dropout rate
         (0.01, 0.001, 0.0001),  # initialization std
-        (3, 30, 300, 3000)  # smoothness
+        (0.3, 3, 30, 300, 3000)  # smoothness
     )]
 
 
