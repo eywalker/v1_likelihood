@@ -555,6 +555,7 @@ class FittedPoissonKL(dj.Computed):
 @schema
 class OptimalPoissonScores(dj.Computed):
     definition = """
+    -> GaussianSimulation
     -> BinConfig
     ---
     fit_trainset_score: float 
