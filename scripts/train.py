@@ -29,9 +29,9 @@ import datajoint as dj
 
 train.CVSet().populate(order='random', reserve_jobs=True)
 restr = train.BinConfig & 'bin_counts = 91'
+train.RefinedCVTrainedModel().populate(restr, order='random', reserve_jobs=True)
 train.LinearRegression().populate(order='random', reserve_jobs=True)
 analysis.LikelihoodStats.populate(order='random', reserve_jobs=True)
-train.RefinedCVTrainedModel().populate(restr, order='random', reserve_jobs=True)
 #
 # train.BestRecoveredModel().populate(restr, order='random', reserve_jobs=True)
 #
