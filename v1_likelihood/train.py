@@ -860,7 +860,7 @@ class FixedLikelihoodTrainParam(dj.Lookup):
     init_std:       float     # standard deviation for weight initialization
     smoothness:     float     # regularizer on Laplace smoothness
     beta:        float     # regularizer on L2 norm of weights
-    sigma_init      float   # standard deviation for initializing Gaussian likelihood
+    sigma_init:      float   # standard deviation for initializing Gaussian likelihood
     """
     contents = [(list_hash(x), ) + x for x in product(
         (1e-4, 1e-3, 1e-2),     # learning rate
