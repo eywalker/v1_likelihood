@@ -860,13 +860,15 @@ class FixedLikelihoodTrainParam(dj.Lookup):
     init_std:       float     # standard deviation for weight initialization
     smoothness:     float     # regularizer on Laplace smoothness
     beta:        float     # regularizer on L2 norm of weights
+    sigma_init      float   # standard deviation for initializing Gaussian likelihood
     """
     contents = [(list_hash(x), ) + x for x in product(
         (1e-4, 1e-3, 1e-2),     # learning rate
         (0.2, 0.5),      # dropout rate
         (1e-4, 1e-3),    # initialization std
         (3, 30) ,  # smoothness,
-        (0.5, 1)   # beta
+        (0.5, 1),   # beta
+        (3, 5),  # sigma_init
     )]
 
 
@@ -1004,11 +1006,12 @@ class CVTrainedFixedLikelihood(dj.Computed):
         alpha = float((FixedLikelihoodTrainParam() & key).fetch1('smoothness'))
         beta = float((FixedLikelihoodTrainParam() & key).fetch1('beta'))
         init_std = float((FixedLikelihoodTrainParam() & key).fetch1('init_std'))
+        sigma_init = float((FixedLikelihoodTrainParam() & key).fetch1('sigma_init'))
         dropout = float((FixedLikelihoodTrainParam() & key).fetch1('dropout'))
         h1, h2 = [int(x) for x in (FixedLikelihoodModelDesign() & key).fetch1('hidden1', 'hidden2')]
         seed = key['train_seed']
 
-        net = FlexiNet(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net = FlexiNet(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout, sigma_init=sigma_init)
         net.cuda()
         loss = nn.CrossEntropyLoss().cuda()
 
@@ -1040,8 +1043,31 @@ class CVTrainedFixedLikelihood(dj.Computed):
 
         self.insert1(key)
 
+@schema
+class BestFixedLikelihoodModel(dj.Computed):
+    definition = """
+    -> RefinedCVTrainedModel
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    """
 
+    @property
+    def key_source(self):
+        return CVSet() * BinConfig()
 
+    def get_best(self, key):
+        targets = RefinedCVTrainedModel() * ModelDesign & key
+        best = targets * CVSet().aggr(targets, max_value='min(cnn_valid_score)') & 'cnn_valid_score = max_value'
+        return best
+
+    def make(self, key):
+        best = self.get_best(key)
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
+        best_model = best.fetch(dj.key, order_by='hidden1 DESC')[0]
+
+        self.insert(RefinedCVTrainedModel() & best_model)
 
 # saving state dict {k: v.cpu().numpy() for k, v in model.state_dict().items()})
 # loading: state_dict = (self & key).fetch1('model')

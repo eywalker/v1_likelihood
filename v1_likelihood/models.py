@@ -51,13 +51,14 @@ class Net(nn.Module):
 
 
 class FlexiNet(nn.Module):
-    def __init__(self, n_channel=96, n_hidden=100, n_output=91, dropout=0.5, std=0.01):
+    def __init__(self, n_channel=96, n_hidden=100, n_output=91, dropout=0.5, sigma_init=3, std=0.01):
         super().__init__()
         self.n_channel = n_channel
         self.std = std
         self.n_output = n_output
         self.n_likelihood = n_output
         self.dropout = dropout
+        self.sigma_init = sigma_init
 
         if not isinstance(n_hidden, (list, tuple)):
             n_hidden = (n_hidden,)
@@ -131,7 +132,7 @@ class FlexiNet(nn.Module):
         self.apply(fn)
         # normal(self.likelihood, std=self.std * 0.1)
         self.likelihood.data.copy_(
-            -(torch.arange(self.n_likelihood).view(1, 1, 1, -1) - self.n_likelihood // 2).pow(2) / 2 / 7 ** 2)
+            -(torch.arange(self.n_likelihood).view(1, 1, 1, -1) - self.n_likelihood // 2).pow(2) / 2 / self.sigma_init ** 2)
         # noise = (torch.randn(prior.shape) * 0.).type_as(prior.data)
         # self.likelihood.data.copy_((prior.data + noise).view(1, 1, 1, -1))
         # normal(self.likelihood, std=0.001)
