@@ -722,7 +722,7 @@ class BestRefinedModel(dj.Computed):
 
     @property
     def key_source(self):
-        return CVSet() * BinConfig()
+        return CVSet() * BinConfig() & RefinedCVTrainedModel
 
     def get_best(self, key):
         targets = RefinedCVTrainedModel() * ModelDesign & key
@@ -884,7 +884,6 @@ class CVTrainedFixedLikelihood(dj.Computed):
     cnn_train_score: float   # score on train set
     cnn_valid_score:  float   # score on test set
     avg_sigma:   float   # average width of the likelihood functions
-    model: longblob      # trained model
     """
 
     def load_model(self, key=None):
@@ -1039,7 +1038,7 @@ class CVTrainedFixedLikelihood(dj.Computed):
           avg_sigma = -1
 
         key['avg_sigma'] = avg_sigma
-        key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+        #key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
 
         self.insert1(key)
 

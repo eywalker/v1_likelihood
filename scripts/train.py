@@ -33,6 +33,12 @@ train.RefinedCVTrainedModel().populate(restr, order='random', reserve_jobs=True)
 train.LinearRegression().populate(order='random', reserve_jobs=True)
 analysis.LikelihoodStats.populate(order='random', reserve_jobs=True)
 
+# Manual step of selecting out the best model should occur here
+
+# now recover the model
+train.BestRecoveredModel().populate(order='random', reserve_jobs=True)
+
+
 
 targets = analysis.class_discrimination.CSCLookup() & 'count_stop = 500 and count_start = 0'
 bin_config = train.BinConfig() & 'bin_counts = 91'
