@@ -158,9 +158,9 @@ class Deploy():
         _service = service
 
         self.initialize()
-        with cd(self.host_docker_dir):
+        with cd(self.host_docker_dir), shell_env(HOSTNAME=env.host_string):
             run('docker-compose build --no-cache --build-arg ssh_prv_key="$(cat ~/.ssh/id_rsa)" --build-arg ssh_pub_key="$(cat ~/.ssh/id_rsa.pub)" {}'.format(service))
-            bare_run_str = 'docker-compose run -d'
+            bare_run_str = 'docker-compose run -d '
             gpu_i = 0
             container_i = 0
             gpu_groups = []

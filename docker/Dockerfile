@@ -27,5 +27,6 @@ COPY --from=intermediate /src/v1_likelihood /src/v1_likelihood
 RUN pip install -e /src/v1_likelihood
 RUN pip install h5py
 
-WORKDIR /src/v1_likelihood/scripts
-ENTRYPOINT ["python3"]
+#WORKDIR /src/v1_likelihood/scripts
+WORKDIR /notebooks
+#ENTRYPOINT ["python3"]
