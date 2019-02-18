@@ -1,0 +1,10 @@
+version: '3'
+services:
+  train:
+    build: .
+    env_file: .env
+    hostname: ${HOSTNAME}
+    ipc: host
+    volumes:
+      - /tmp:/tmp
+      - /mnt/lab/users/eywalker/data:/data
