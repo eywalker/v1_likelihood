@@ -715,7 +715,7 @@ class CVTrainedModelWithState(dj.Computed):
     @property
     def key_source(self):
         missing = ((CVSet * (BinConfig & 'bin_counts=91').proj()) - BestRecoveredModel()).fetch('KEY')
-        return CVSet * BinConfig * ModelDesign * RefinedTrainParam * TrainSeed & missing
+        return (CVSet * BinConfig * ModelDesign * RefinedTrainParam * TrainSeed & missing).proj()
 
     def load_model(self, key=None):
         if key is None:
