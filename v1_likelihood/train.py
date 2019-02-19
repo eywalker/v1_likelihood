@@ -21,6 +21,12 @@ dj.config['external-model'] = dict(
     location='/external/state_dicts/')
 
 
+# Check for access to external!
+external_access = False
+with open('/external/pass.dat', 'r'):
+    external_access = True
+
+
 def extend_ones(x):
     return np.concatenate([x, np.ones([x.shape[0], 1])], axis=1)
 
@@ -877,6 +883,8 @@ class CVTrainedModelWithState(dj.Computed):
 
 
     def make(self, key):
+        if not external_access:
+            raise ValueError('No access to external! Will not be able to save model!')
         #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
 
         delta = float((BinConfig() & key).fetch1('bin_width'))
@@ -1271,6 +1279,8 @@ class CVTrainedFixedLikelihood(dj.Computed):
         return net, train_score, valid_score
 
     def make(self, key):
+        if not external_access:
+            raise ValueError('No access to external! Will not be able to save model!')
         #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
 
         delta = float((BinConfig() & key).fetch1('bin_width'))
