@@ -14,7 +14,11 @@ from tqdm import tqdm
 
 from .cd_dataset import CleanContrastSessionDataSet
 
-schema = dj.schema('edgar_cd_ml', locals())
+schema = dj.schema('edgar_cd_ml')
+
+dj.config['external-model'] = dict(
+    protocol='file',
+    location='/external/state_dicts/')
 
 
 def extend_ones(x):
@@ -691,6 +695,260 @@ class RefinedCVTrainedModel(dj.Computed):
         self.insert1(key)
 
 
+@schema
+class CVTrainedModelWithState(dj.Computed):
+    definition = """
+    -> CVSet
+    -> BinConfig
+    -> ModelDesign
+    -> RefinedTrainParam
+    -> TrainSeed
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    model_saved: bool   # whether model was saved
+    model: external-model  # saved model
+    """
+
+
+    @property
+    def key_source(self):
+        missing = ((CVSet * (BinConfig & 'bin_counts=91').proj()) - BestRecoveredModel()).fetch('KEY')
+        return CVSet * BinConfig * ModelDesign * RefinedTrainParam * TrainSeed & missing
+
+    def load_model(self, key=None):
+        if key is None:
+            key = {}
+
+        rel = self & key
+
+        state_dict = rel.fetch1('model')
+        state_dict = {k: torch.from_numpy(state_dict[k][0]) for k in state_dict.dtype.names}
+
+        init_std = float((RefinedTrainParam() & rel).fetch1('init_std'))
+        dropout = float((RefinedTrainParam() & rel).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (ModelDesign() & rel).fetch1('hidden1', 'hidden2')]
+        nbins = int((BinConfig() & rel).fetch1('bin_counts'))
+
+        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net.load_state_dict(state_dict)
+        return net
+
+    def get_dataset(self, key=None):
+        if key is None:
+            key = self.fetch1(dj.key)
+
+        train_set, valid_set = (CVSet() & key).fetch_datasets()
+        bin_width = float((BinConfig() & key).fetch1('bin_width'))
+        bin_counts = int((BinConfig() & key).fetch1('bin_counts'))
+        clip_outside = bool((BinConfig() & key).fetch1('clip_outside'))
+
+        train_counts, train_ori = np.concatenate(train_set['counts'], 1).T, train_set['orientation']
+        valid_counts, valid_ori = np.concatenate(valid_set['counts'], 1).T, valid_set['orientation']
+
+        xv, train_bins = binnify(train_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+        _, valid_bins = binnify(valid_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+
+        good_pos = train_bins >= 0
+        train_counts = train_counts[good_pos]
+        train_ori = train_bins[good_pos]
+
+        good_pos = valid_bins >= 0
+        valid_counts = valid_counts[good_pos]
+        valid_ori = valid_bins[good_pos]
+
+        train_x = torch.Tensor(train_counts)
+        train_t = torch.Tensor(train_ori).type(torch.LongTensor)
+
+        valid_x = Variable(torch.Tensor(valid_counts))
+        valid_t = Variable(torch.Tensor(valid_ori).type(torch.LongTensor))
+
+        return train_x, train_t, valid_x, valid_t
+
+    def make_objective(self, valid_x, valid_t, prior, delta):
+        def objective(net, x=None, t=None):
+            if x is None and t is None:
+                x = valid_x
+                t = valid_t
+            net.eval()
+            y = net(x)
+            posterior = y + prior
+            _, loc = torch.max(posterior, dim=1)
+            v = (t.double() - loc.double()).pow(2).mean().sqrt() * delta
+            return v.data.cpu().numpy()[0]
+        return objective
+
+    def evaluate(self, key=None):
+        if key is None:
+            key = {}
+        key = (self & key).fetch1('KEY')
+
+
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        # valid_dataset = TensorDataset(valid_x, valid_t)
+
+        objective = self.make_objective(valid_x, valid_t, prior, delta)
+
+        net = self.load_model(key)
+        net.cuda()
+        print('Evaluating...')
+        net.eval()
+
+        train_score = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        valid_score = objective(net, x=valid_x, t=valid_t)
+
+        return net, train_score, valid_score
+
+    def train(self, net, loss, objective, train_dataset, prior, alpha, init_lr):
+        learning_rates = init_lr * 3.0 ** (-np.arange(4))
+        for lr in learning_rates:
+            print('\n\n\n\n LEARNING RATE: {}'.format(lr))
+            optimizer = torch.optim.SGD(net.parameters(), lr=lr)
+            for epoch, valid_score in early_stopping(net, objective, interval=20, start=100, patience=20,
+                                                     max_iter=300000, maximize=False):
+                data_loader = DataLoader(train_dataset, shuffle=True, batch_size=128)
+                for x_, t_ in data_loader:
+                    x, t = Variable(x_).cuda(), Variable(t_).cuda()
+                    net.train()
+                    optimizer.zero_grad()
+                    y = net(x)
+                    post = y + prior
+                    val, _ = post.max(1, keepdim=True)
+                    post = post - val
+                    conv_filter = Variable(
+                        torch.from_numpy(np.array([-0.25, 0.5, -0.25])[None, None, :]).type(y.data.type()))
+                    try:
+                        smoothness = nn.functional.conv1d(y.unsqueeze(1), conv_filter).pow(2).mean()
+                    except:
+                        # if smoothness computation overflows, then don't bother with it
+                        smoothness = 0
+                    score = loss(post, t)
+                    score = score + alpha * smoothness
+                    score.backward()
+                    optimizer.step()
+                if epoch % 10 == 0:
+                    print('Score: {}'.format(score.data.cpu().numpy()[0]))
+                    # scheduler.step()
+
+    def test_model(self, key=None):
+        if key is None:
+            key = self.fetch1('KEY')
+
+        net = self.load_model(key)
+        net.cuda()
+        net.eval()
+
+        objective = self.prepare_objective(key)
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+        train_score = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        valid_score = objective(net, x=valid_x, t=valid_t)
+        return train_score, valid_score
+
+
+    def prepare_objective(self, key):
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        return self.make_objective(valid_x, valid_t, prior, delta)
+
+
+    def make(self, key):
+        #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
+
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        train_dataset = TensorDataset(train_x, train_t)
+        #valid_dataset = TensorDataset(valid_x, valid_t)
+
+        objective = self.make_objective(valid_x, valid_t, prior, delta)
+
+
+        init_lr = float((RefinedTrainParam() & key).fetch1('learning_rate'))
+        alpha = float((RefinedTrainParam() & key).fetch1('smoothness'))
+        init_std = float((RefinedTrainParam() & key).fetch1('init_std'))
+        dropout = float((RefinedTrainParam() & key).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (ModelDesign() & key).fetch1('hidden1', 'hidden2')]
+        seed = key['train_seed']
+
+        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net.cuda()
+        loss = nn.CrossEntropyLoss().cuda()
+
+        net.std = init_std
+        set_seed(seed)
+        net.initialize()
+
+        self.train(net, loss, objective, train_dataset, prior, alpha, init_lr)
+
+        print('Evaluating...')
+        net.eval()
+
+        key['cnn_train_score'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        key['cnn_valid_score'] = objective(net, x=valid_x, t=valid_t)
+
+        y = net(valid_x)
+        yd = y.data.cpu().numpy()
+        yd = np.exp(yd)
+        yd = yd / yd.sum(axis=1, keepdims=True)
+
+        loc = yd.argmax(axis=1)
+        ds = (np.arange(nbins) - loc[:, None]) ** 2
+        avg_sigma = np.mean(np.sqrt(np.sum(yd * ds, axis=1))) * delta
+        if np.isnan(avg_sigma):
+          avg_sigma = -1
+
+        key['avg_sigma'] = avg_sigma
+
+        scores = (CVTrainedModelWithState & (CVSet * BinConfig & key)).fetch('cnn_valid_score')
+
+        key['model_saved'] = int(len(scores) == 0 or key['cnn_valid_score'] < scores.min())
+        if key['model_saved']:
+            print('Better model achieved! Updating...')
+            blob = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+        else:
+            blob = {}
+
+        key['model'] = blob
+        key['model_saved'] = int(key['model_saved'])
+        #key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+
+        self.insert1(key)
+
 
 
 def mean_post(lp):
@@ -811,8 +1069,6 @@ class BestRecoveredModel(RefinedCVTrainedModel):
         key['avg_sigma'] = avg_sigma
         key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
 
-
-
         self.insert1(key)
 
 
@@ -884,6 +1140,8 @@ class CVTrainedFixedLikelihood(dj.Computed):
     cnn_train_score: float   # score on train set
     cnn_valid_score:  float   # score on test set
     avg_sigma:   float   # average width of the likelihood functions
+    model_saved: bool   # whether model was saved
+    model: external-model  # saved model
     """
 
     def load_model(self, key=None):
@@ -979,6 +1237,39 @@ class CVTrainedFixedLikelihood(dj.Computed):
                     print('Score: {}'.format(score.data.cpu().numpy()[0]))
                     # scheduler.step()
 
+    def evaluate(self, key=None):
+        if key is None:
+            key = {}
+        key = (self & key).fetch1('KEY')
+
+
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        # valid_dataset = TensorDataset(valid_x, valid_t)
+
+        objective = self.make_objective(valid_x, valid_t, prior, delta)
+
+        net = self.load_model(key)
+        net.cuda()
+        print('Evaluating...')
+        net.eval()
+
+        train_score = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        valid_score = objective(net, x=valid_x, t=valid_t)
+
+        return net, train_score, valid_score
+
     def make(self, key):
         #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
 
@@ -1038,35 +1329,46 @@ class CVTrainedFixedLikelihood(dj.Computed):
           avg_sigma = -1
 
         key['avg_sigma'] = avg_sigma
-        #key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+
+        scores = (CVTrainedFixedLikelihood & (CVSet * BinConfig & key)).fetch('cnn_valid_score')
+
+        key['model_saved'] = int(len(scores) == 0 or key['cnn_valid_score'] < scores.min())
+        if key['model_saved']:
+            print('Better model achieved! Updating...')
+            blob = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+        else:
+            blob = {}
+
+        key['model'] = blob
+        key['model_saved'] = int(key['model_saved'])
 
         self.insert1(key)
 
-@schema
-class BestFixedLikelihoodModel(dj.Computed):
-    definition = """
-    -> RefinedCVTrainedModel
-    ---
-    cnn_train_score: float   # score on train set
-    cnn_valid_score:  float   # score on test set
-    avg_sigma:   float   # average width of the likelihood functions
-    """
-
-    @property
-    def key_source(self):
-        return CVSet() * BinConfig()
-
-    def get_best(self, key):
-        targets = RefinedCVTrainedModel() * ModelDesign & key
-        best = targets * CVSet().aggr(targets, max_value='min(cnn_valid_score)') & 'cnn_valid_score = max_value'
-        return best
-
-    def make(self, key):
-        best = self.get_best(key)
-        # if duplicate score happens to occur, pick the model with the largest hidden layer
-        best_model = best.fetch(dj.key, order_by='hidden1 DESC')[0]
-
-        self.insert(RefinedCVTrainedModel() & best_model)
+# @schema
+# class BestFixedLikelihoodModel(dj.Computed):
+#     definition = """
+#     -> RefinedCVTrainedModel
+#     ---
+#     cnn_train_score: float   # score on train set
+#     cnn_valid_score:  float   # score on test set
+#     avg_sigma:   float   # average width of the likelihood functions
+#     """
+#
+#     @property
+#     def key_source(self):
+#         return CVSet() * BinConfig()
+#
+#     def get_best(self, key):
+#         targets = RefinedCVTrainedModel() * ModelDesign & key
+#         best = targets * CVSet().aggr(targets, max_value='min(cnn_valid_score)') & 'cnn_valid_score = max_value'
+#         return best
+#
+#     def make(self, key):
+#         best = self.get_best(key)
+#         # if duplicate score happens to occur, pick the model with the largest hidden layer
+#         best_model = best.fetch(dj.key, order_by='hidden1 DESC')[0]
+#
+#         self.insert(RefinedCVTrainedModel() & best_model)
 
 # saving state dict {k: v.cpu().numpy() for k, v in model.state_dict().items()})
 # loading: state_dict = (self & key).fetch1('model')

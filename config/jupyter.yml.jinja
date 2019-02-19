@@ -17,6 +17,7 @@ services:
       - ../v1_likelihood:/src/v1_likelihood
       - /mnt/lab/users/eywalker/data:/data
       - /mnt/lab/users/eywalker/v1_project/data:/v1_data
+      - /mnt/scratch07/edgar_data/v1_likelihood:/external
     environment:
       - DISPLAY=$DISPLAY
   {% endfor %}
