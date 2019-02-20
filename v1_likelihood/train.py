@@ -1401,7 +1401,7 @@ class BestFxiedLikelihood(dj.Computed):
 
 
     def make(self, key):
-        best = best_model(CVTrainedFixedLikelihood, key) * FixedLikelihoodModelDesign
+        best = best_model(CVTrainedFixedLikelihood &  'model_saved = True', key) * FixedLikelihoodModelDesign
         # if duplicate score happens to occur, pick the model with the largest hidden layer
         selected = best.fetch(dj.key, order_by='hidden1 DESC')[0]
 
