@@ -958,6 +958,11 @@ class CVTrainedModelWithState(dj.Computed):
         self.insert1(key)
 
 
+def best_model(model, key=None):
+    if key is None:
+        key = {}
+    targets = model & key
+    return targets * (CVSet * BinConfig).aggr(targets, min_value='min(cnn_valid_score)') & 'cnn_valid_score = min_value'
 
 def mean_post(lp):
     nbins = lp.size(1)
@@ -1097,6 +1102,32 @@ class BestModelByBin(dj.Computed):
     """
 
 
+
+@schema
+class BestModelWithState(dj.Computed):
+    definition = """
+    -> CVTrainedModelWithState
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    """
+
+    @property
+    def key_source(self):
+        return CVSet() * BinConfig() & CVTrainedModelWithState
+
+    def get_best(self, key):
+        targets = RefinedCVTrainedModel() * ModelDesign & key
+        best = targets * CVSet().aggr(targets, max_value='min(cnn_valid_score)') & 'cnn_valid_score = max_value'
+        return best
+
+    def make(self, key):
+        best = best_model(CVTrainedModelWithState, key) * ModelDesign
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
+        selected = best.fetch(dj.key, order_by='hidden1 DESC')[0]
+
+        self.insert(CVTrainedModelWithState() & selected, ignore_extra_fields=True)
 
 
 @schema
@@ -1353,6 +1384,28 @@ class CVTrainedFixedLikelihood(dj.Computed):
         key['model_saved'] = int(key['model_saved'])
 
         self.insert1(key)
+
+@schema
+class BestFxiedLikelihood(dj.Computed):
+    definition = """
+    -> CVTrainedFixedLikelihood
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    """
+
+    @property
+    def key_source(self):
+        return CVSet() * BinConfig() & CVTrainedFixedLikelihood
+
+
+    def make(self, key):
+        best = best_model(CVTrainedFixedLikelihood, key) * FixedLikelihoodModelDesign
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
+        selected = best.fetch(dj.key, order_by='hidden1 DESC')[0]
+
+        self.insert(CVTrainedFixedLikelihood() & selected, ignore_extra_fields=True)
 
 # @schema
 # class BestFixedLikelihoodModel(dj.Computed):
