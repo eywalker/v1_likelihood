@@ -40,7 +40,7 @@ train.LinearRegression().populate(order='random', reserve_jobs=True)
 
 
 
-targets = analysis.class_discrimination.CSCLookup() & 'count_stop = 500 and count_start = 0'
+targets = analysis.class_discrimination.CSCLookup() & 'count_stop = 500 and count_start = 250'
 bin_config = train.BinConfig() & 'bin_counts = 91'
 train.CVTrainedFixedLikelihood().populate(targets, bin_config, order='random', reserve_jobs=True)
 #
