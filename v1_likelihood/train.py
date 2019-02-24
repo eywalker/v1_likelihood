@@ -810,7 +810,6 @@ class CVTrainedModelWithState(dj.Computed):
 
         net = self.load_model(key)
         net.cuda()
-        print('Evaluating...')
         net.eval()
 
         train_score = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
@@ -1301,7 +1300,6 @@ class CVTrainedFixedLikelihood(dj.Computed):
 
         net = self.load_model(key)
         net.cuda()
-        print('Evaluating...')
         net.eval()
 
         train_score = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
@@ -1406,6 +1404,45 @@ class BestFxiedLikelihood(dj.Computed):
         selected = best.fetch(dj.key, order_by='hidden1 DESC')[0]
 
         self.insert(CVTrainedFixedLikelihood() & selected, ignore_extra_fields=True)
+
+@schema
+class BestFixedLikelihood(dj.Computed):
+    definition = """
+    -> CVTrainedFixedLikelihood
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    """
+
+    @property
+    def key_source(self):
+        return CVSet() * BinConfig() & CVTrainedFixedLikelihood
+
+    def make(self, key):
+        best = best_model(CVTrainedFixedLikelihood & 'model_saved = True', key) * FixedLikelihoodModelDesign
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
+        selected = best.fetch(dj.key, order_by='hidden1 DESC')[0]
+
+        self.insert(CVTrainedFixedLikelihood() & selected, ignore_extra_fields=True)
+
+
+@schema
+class BestFixedLikelihoodByBin(dj.Computed):
+    definition = """
+    -> CVSet
+    -> BinConfig
+    ---
+    -> FixedLikelihoodModelDesign
+    -> FixedLikelihoodTrainParam
+    -> TrainSeed
+    cnn_train_score: float  # score on train set
+    cnn_valid_score:  float  # score on test set
+    avg_sigma:   float  # average width of the likelihood functions
+    model_saved: bool  # whether model was saved
+    model: longblob  # saved model
+    """
+
 
 # @schema
 # class BestFixedLikelihoodModel(dj.Computed):

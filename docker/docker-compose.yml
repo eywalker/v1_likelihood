@@ -8,4 +8,5 @@ services:
     volumes:
       - /tmp:/tmp
       - /mnt/lab/users/eywalker/data:/data
+      - /mnt/lab/users/eywalker/v1_project/data:/v1_data
       - /mnt/scratch07/edgar_data/v1_likelihood:/external
