@@ -6,7 +6,7 @@ from scipy.interpolate import interp1d
 cd_dataset = dj.create_virtual_module('cd_dataset', 'edgar_cd_dataset')
 class_discrimination = dj.create_virtual_module('class_discrimination', 'edgar_class_discrimination')
 cd_lc = dj.create_virtual_module('cd_lc', 'edgar_cd_lc')
-cd_dlset = dj.create_virtual_module('cd_dlset', 'edgar_cd_dlset');
+cd_dlset = dj.create_virtual_module('cd_dlset', 'edgar_cd_dlset')
 ephys = dj.create_virtual_module('ephys', 'ephys')
 
 

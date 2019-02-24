@@ -957,6 +957,265 @@ class CVTrainedModelWithState(dj.Computed):
         self.insert1(key)
 
 
+@schema
+class CVTrainedModelWithStateAlt(dj.Computed):
+    """
+    This uses cross entropy on the validation set as the validation set measure and early stopping criteria
+    """
+    definition = """
+    -> CVSet
+    -> BinConfig
+    -> ModelDesign
+    -> RefinedTrainParam
+    -> TrainSeed
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    model_saved: bool   # whether model was saved
+    model: external-model  # saved model
+    """
+
+    @property
+    def key_source(self):
+        missing = ((CVSet * (BinConfig & 'bin_counts=91').proj()) - BestRecoveredModel()).fetch('KEY')
+        return (CVSet * BinConfig * ModelDesign * RefinedTrainParam * TrainSeed & missing).proj()
+
+    def load_model(self, key=None):
+        if key is None:
+            key = {}
+
+        rel = self & key
+
+        state_dict = rel.fetch1('model')
+        state_dict = {k: torch.from_numpy(state_dict[k][0]) for k in state_dict.dtype.names}
+
+        init_std = float((RefinedTrainParam() & rel).fetch1('init_std'))
+        dropout = float((RefinedTrainParam() & rel).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (ModelDesign() & rel).fetch1('hidden1', 'hidden2')]
+        nbins = int((BinConfig() & rel).fetch1('bin_counts'))
+
+        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net.load_state_dict(state_dict)
+        return net
+
+    def get_dataset(self, key=None):
+        if key is None:
+            key = self.fetch1(dj.key)
+
+        train_set, valid_set = (CVSet() & key).fetch_datasets()
+        bin_width = float((BinConfig() & key).fetch1('bin_width'))
+        bin_counts = int((BinConfig() & key).fetch1('bin_counts'))
+        clip_outside = bool((BinConfig() & key).fetch1('clip_outside'))
+
+        train_counts, train_ori = np.concatenate(train_set['counts'], 1).T, train_set['orientation']
+        valid_counts, valid_ori = np.concatenate(valid_set['counts'], 1).T, valid_set['orientation']
+
+        xv, train_bins = binnify(train_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+        _, valid_bins = binnify(valid_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+
+        good_pos = train_bins >= 0
+        train_counts = train_counts[good_pos]
+        train_ori = train_bins[good_pos]
+
+        good_pos = valid_bins >= 0
+        valid_counts = valid_counts[good_pos]
+        valid_ori = valid_bins[good_pos]
+
+        train_x = torch.Tensor(train_counts)
+        train_t = torch.Tensor(train_ori).type(torch.LongTensor)
+
+        valid_x = Variable(torch.Tensor(valid_counts))
+        valid_t = Variable(torch.Tensor(valid_ori).type(torch.LongTensor))
+
+        return train_x, train_t, valid_x, valid_t
+
+    def make_objective(self, valid_x, valid_t, prior, loss):
+        def objective(net, x=None, t=None):
+            if x is None and t is None:
+                x = valid_x
+                t = valid_t
+            net.eval()
+            y = net(x)
+            posterior = y + prior
+            # evaluate loss on validation set
+            return loss(posterior, t).data.cpu().numpy()[0]
+        return objective
+
+    def evaluate(self, key=None):
+        if key is None:
+            key = {}
+        key = (self & key).fetch1('KEY')
+
+
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        # valid_dataset = TensorDataset(valid_x, valid_t)
+
+        loss = nn.CrossEntropyLoss().cuda()
+        objective = self.make_objective(valid_x, valid_t, prior, loss)
+
+        net = self.load_model(key)
+        net.cuda()
+        net.eval()
+
+        train_score = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        valid_score = objective(net, x=valid_x, t=valid_t)
+
+        return net, train_score, valid_score
+
+    def train(self, net, loss, objective, train_dataset, prior, alpha, init_lr):
+        learning_rates = init_lr * 3.0 ** (-np.arange(4))
+        for lr in learning_rates:
+            print('\n\n\n\n LEARNING RATE: {}'.format(lr))
+            optimizer = torch.optim.SGD(net.parameters(), lr=lr)
+            for epoch, valid_score in early_stopping(net, objective, interval=20, start=100, patience=20,
+                                                     max_iter=300000, maximize=False):
+                data_loader = DataLoader(train_dataset, shuffle=True, batch_size=128)
+                for x_, t_ in data_loader:
+                    x, t = Variable(x_).cuda(), Variable(t_).cuda()
+                    net.train()
+                    optimizer.zero_grad()
+                    y = net(x)
+                    post = y + prior
+                    val, _ = post.max(1, keepdim=True)
+                    post = post - val
+                    conv_filter = Variable(
+                        torch.from_numpy(np.array([-0.25, 0.5, -0.25])[None, None, :]).type(y.data.type()))
+                    try:
+                        smoothness = nn.functional.conv1d(y.unsqueeze(1), conv_filter).pow(2).mean()
+                    except:
+                        # if smoothness computation overflows, then don't bother with it
+                        smoothness = 0
+                    score = loss(post, t)
+                    score = score + alpha * smoothness
+                    score.backward()
+                    optimizer.step()
+                if epoch % 10 == 0:
+                    print('Score: {}'.format(score.data.cpu().numpy()[0]))
+                    # scheduler.step()
+
+    def test_model(self, key=None):
+        if key is None:
+            key = self.fetch1('KEY')
+
+        net = self.load_model(key)
+        net.cuda()
+        net.eval()
+
+        objective = self.prepare_objective(key)
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+        train_score = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        valid_score = objective(net, x=valid_x, t=valid_t)
+        return train_score, valid_score
+
+
+    def prepare_objective(self, key):
+        loss = nn.CrossEntropyLoss().cuda()
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        return self.make_objective(valid_x, valid_t, prior, loss)
+
+
+    def make(self, key):
+        if not external_access:
+            raise ValueError('No access to external! Will not be able to save model!')
+        #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
+
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        train_dataset = TensorDataset(train_x, train_t)
+        #valid_dataset = TensorDataset(valid_x, valid_t)
+
+        loss = nn.CrossEntropyLoss().cuda()
+        objective = self.make_objective(valid_x, valid_t, prior, loss)
+
+
+        init_lr = float((RefinedTrainParam() & key).fetch1('learning_rate'))
+        alpha = float((RefinedTrainParam() & key).fetch1('smoothness'))
+        init_std = float((RefinedTrainParam() & key).fetch1('init_std'))
+        dropout = float((RefinedTrainParam() & key).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (ModelDesign() & key).fetch1('hidden1', 'hidden2')]
+        seed = key['train_seed']
+
+        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net.cuda()
+
+        net.std = init_std
+        set_seed(seed)
+        net.initialize()
+
+        self.train(net, loss, objective, train_dataset, prior, alpha, init_lr)
+
+        print('Evaluating...')
+        net.eval()
+
+        key['cnn_train_score'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        key['cnn_valid_score'] = objective(net, x=valid_x, t=valid_t)
+
+        y = net(valid_x)
+        yd = y.data.cpu().numpy()
+        yd = np.exp(yd)
+        yd = yd / yd.sum(axis=1, keepdims=True)
+
+        loc = yd.argmax(axis=1)
+        ds = (np.arange(nbins) - loc[:, None]) ** 2
+        avg_sigma = np.mean(np.sqrt(np.sum(yd * ds, axis=1))) * delta
+        if np.isnan(avg_sigma):
+          avg_sigma = -1
+
+        key['avg_sigma'] = avg_sigma
+
+        scores = (CVTrainedModelWithState & (CVSet * BinConfig & key)).fetch('cnn_valid_score')
+
+        key['model_saved'] = int(len(scores) == 0 or key['cnn_valid_score'] < scores.min())
+        if key['model_saved']:
+            print('Better model achieved! Updating...')
+            blob = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+        else:
+            blob = {}
+
+        key['model'] = blob
+        key['model_saved'] = int(key['model_saved'])
+        #key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+
+        self.insert1(key)
+
+
 def best_model(model, key=None):
     if key is None:
         key = {}
@@ -1005,7 +1264,6 @@ class BestRefinedModel(dj.Computed):
         best_model = best.fetch(dj.key, order_by='hidden1 DESC')[0]
 
         self.insert(RefinedCVTrainedModel() & best_model)
-
 
 @schema
 class BestRecoveredModel(RefinedCVTrainedModel):
@@ -1099,7 +1357,6 @@ class BestModelByBin(dj.Computed):
     avg_sigma:   float   # average width of the likelihood functions
     model: longblob      # trained model
     """
-
 
 
 @schema
@@ -1383,27 +1640,228 @@ class CVTrainedFixedLikelihood(dj.Computed):
 
         self.insert1(key)
 
+
+
 @schema
-class BestFxiedLikelihood(dj.Computed):
+class CVTrainedFixedLikelihoodAlt(dj.Computed):
+    """
+    Alternate version using the loss (cross entropy) on the validation set
+    """
     definition = """
-    -> CVTrainedFixedLikelihood
+    -> CVSet
+    -> BinConfig
+    -> FixedLikelihoodModelDesign
+    -> FixedLikelihoodTrainParam
+    -> TrainSeed
     ---
     cnn_train_score: float   # score on train set
     cnn_valid_score:  float   # score on test set
     avg_sigma:   float   # average width of the likelihood functions
+    model_saved: bool   # whether model was saved
+    model: external-model  # saved model
     """
 
-    @property
-    def key_source(self):
-        return CVSet() * BinConfig() & CVTrainedFixedLikelihood
+    def load_model(self, key=None):
+        if key is None:
+            key = {}
 
+        rel = self & key
+
+        state_dict = rel.fetch1('model')
+        state_dict = {k: torch.from_numpy(state_dict[k][0]) for k in state_dict.dtype.names}
+
+        init_std = float((FixedLikelihoodTrainParam() & rel).fetch1('init_std'))
+        dropout = float((FixedLikelihoodTrainParam() & rel).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (FixedLikelihoodModelDesign() & rel).fetch1('hidden1', 'hidden2')]
+        nbins = int((BinConfig() & rel).fetch1('bin_counts'))
+
+        net = FlexiNet(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net.load_state_dict(state_dict)
+        return net
+
+    def get_dataset(self, key=None):
+        if key is None:
+            key = self.fetch1(dj.key)
+
+        train_set, valid_set = (CVSet() & key).fetch_datasets()
+        bin_width = float((BinConfig() & key).fetch1('bin_width'))
+        bin_counts = int((BinConfig() & key).fetch1('bin_counts'))
+        clip_outside = bool((BinConfig() & key).fetch1('clip_outside'))
+
+        train_counts, train_ori = np.concatenate(train_set['counts'], 1).T, train_set['orientation']
+        valid_counts, valid_ori = np.concatenate(valid_set['counts'], 1).T, valid_set['orientation']
+
+        xv, train_bins = binnify(train_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+        _, valid_bins = binnify(valid_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+
+        good_pos = train_bins >= 0
+        train_counts = train_counts[good_pos]
+        train_ori = train_bins[good_pos]
+
+        good_pos = valid_bins >= 0
+        valid_counts = valid_counts[good_pos]
+        valid_ori = valid_bins[good_pos]
+
+        train_x = torch.Tensor(train_counts)
+        train_t = torch.Tensor(train_ori).type(torch.LongTensor)
+
+        valid_x = Variable(torch.Tensor(valid_counts))
+        valid_t = Variable(torch.Tensor(valid_ori).type(torch.LongTensor))
+
+        return train_x, train_t, valid_x, valid_t
+
+    def make_objective(self, valid_x, valid_t, prior, loss):
+        def objective(net, x=None, t=None):
+            if x is None and t is None:
+                x = valid_x
+                t = valid_t
+            net.eval()
+            y = net(x)
+            posterior = y + prior
+            # evaluate loss on validation set
+            return loss(posterior, t).data.cpu().numpy()[0]
+        return objective
+
+    def train(self, net, loss, objective, train_dataset, prior, alpha, beta, init_lr):
+        learning_rates = init_lr * 3.0 ** (-np.arange(4))
+        for lr in learning_rates:
+            print('\n\n\n\n LEARNING RATE: {}'.format(lr))
+            optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+            for epoch, valid_score in early_stopping(net, objective, interval=20, start=100, patience=30,
+                                                     max_iter=300000, maximize=False):
+                data_loader = DataLoader(train_dataset, shuffle=True, batch_size=256)
+                for x_, t_ in data_loader:
+                    x, t = Variable(x_).cuda(), Variable(t_).cuda()
+                    net.train()
+                    optimizer.zero_grad()
+                    y = net(x)
+                    post = y + prior
+                    val, _ = post.max(1, keepdim=True)
+                    post = post - val
+                    conv_filter = Variable(
+                        torch.from_numpy(np.array([-0.25, 0.5, -0.25])[None, None, :]).type(y.data.type()))
+                    try:
+                        smoothness = nn.functional.conv1d(y.unsqueeze(1), conv_filter).pow(2).mean()
+                    except:
+                        # if smoothness computation overflows, then don't bother with it
+                        smoothness = 0
+                    score = loss(post, t)
+                    score = score + alpha * smoothness + beta * net.l2_weights()
+                    score.backward()
+                    optimizer.step()
+                if epoch % 10 == 0:
+                    print('Score: {}'.format(score.data.cpu().numpy()[0]))
+                    # scheduler.step()
+
+    def evaluate(self, key=None):
+        if key is None:
+            key = {}
+        key = (self & key).fetch1('KEY')
+
+
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        # valid_dataset = TensorDataset(valid_x, valid_t)
+
+        loss = nn.CrossEntropyLoss().cuda()
+        objective = self.make_objective(valid_x, valid_t, prior, loss)
+
+        net = self.load_model(key)
+        net.cuda()
+        net.eval()
+
+        train_score = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        valid_score = objective(net, x=valid_x, t=valid_t)
+
+        return net, train_score, valid_score
 
     def make(self, key):
-        best = best_model(CVTrainedFixedLikelihood &  'model_saved = True', key) * FixedLikelihoodModelDesign
-        # if duplicate score happens to occur, pick the model with the largest hidden layer
-        selected = best.fetch(dj.key, order_by='hidden1 DESC')[0]
+        if not external_access:
+            raise ValueError('No access to external! Will not be able to save model!')
+        #train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
 
-        self.insert(CVTrainedFixedLikelihood() & selected, ignore_extra_fields=True)
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        train_dataset = TensorDataset(train_x, train_t)
+        #valid_dataset = TensorDataset(valid_x, valid_t)
+
+        loss = nn.CrossEntropyLoss().cuda()
+        objective = self.make_objective(valid_x, valid_t, prior, loss)
+
+
+        init_lr = float((FixedLikelihoodTrainParam() & key).fetch1('learning_rate'))
+        alpha = float((FixedLikelihoodTrainParam() & key).fetch1('smoothness'))
+        beta = float((FixedLikelihoodTrainParam() & key).fetch1('beta'))
+        init_std = float((FixedLikelihoodTrainParam() & key).fetch1('init_std'))
+        sigma_init = float((FixedLikelihoodTrainParam() & key).fetch1('sigma_init'))
+        dropout = float((FixedLikelihoodTrainParam() & key).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (FixedLikelihoodModelDesign() & key).fetch1('hidden1', 'hidden2')]
+        seed = key['train_seed']
+
+        net = FlexiNet(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout, sigma_init=sigma_init)
+        net.cuda()
+
+        net.std = init_std
+        set_seed(seed)
+        net.initialize()
+
+        self.train(net, loss, objective, train_dataset, prior, alpha, beta, init_lr)
+
+        print('Evaluating...')
+        net.eval()
+
+        key['cnn_train_score'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        key['cnn_valid_score'] = objective(net, x=valid_x, t=valid_t)
+
+        y = net(valid_x)
+        yd = y.data.cpu().numpy()
+        yd = np.exp(yd)
+        yd = yd / yd.sum(axis=1, keepdims=True)
+
+        loc = yd.argmax(axis=1)
+        ds = (np.arange(nbins) - loc[:, None]) ** 2
+        avg_sigma = np.mean(np.sqrt(np.sum(yd * ds, axis=1))) * delta
+        if np.isnan(avg_sigma):
+          avg_sigma = -1
+
+        key['avg_sigma'] = avg_sigma
+
+        scores = (CVTrainedFixedLikelihood & (CVSet * BinConfig & key)).fetch('cnn_valid_score')
+
+        key['model_saved'] = int(len(scores) == 0 or key['cnn_valid_score'] < scores.min())
+        if key['model_saved']:
+            print('Better model achieved! Updating...')
+            blob = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+        else:
+            blob = {}
+
+        key['model'] = blob
+        key['model_saved'] = int(key['model_saved'])
+
+        self.insert1(key)
+
 
 @schema
 class BestFixedLikelihood(dj.Computed):
