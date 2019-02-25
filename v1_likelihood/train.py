@@ -324,11 +324,10 @@ class RefinedTrainParam(dj.Lookup):
     """
     contents = [(list_hash(x), ) + x for x in product(
         (0.01, 0.03, 0.6),     # learning rate
-        (0.2, 0.5,),      # dropout rate
+        (0.2, 0.5),      # dropout rate
         (0.01, 0.001, 0.0001),    # initialization std
         (3, 30, 300,)  # smoothness
     )]
-
 
 
 @schema
@@ -2198,4 +2197,27 @@ class CVTrainedPoissonLike(dj.Computed):
         #key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
 
         self.insert1(key)
+
+
+@schema
+class BestPoissonLike(dj.Computed):
+    definition = """
+    -> CVTrainedPoissonLike
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    """
+
+    @property
+    def key_source(self):
+        return CVSet() * BinConfig() & CVTrainedPoissonLike
+
+    def make(self, key):
+        best = best_model(CVTrainedPoissonLike, key) * PoissonLikeModelDesign
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
+        selected = best.fetch(dj.key, order_by='hidden1 DESC')[0]
+
+        self.insert(CVTrainedPoissonLike() & selected, ignore_extra_fields=True)
+
 

@@ -44,11 +44,11 @@ analysis.LikelihoodSummary.populate(order='random', reserve_jobs=True)
 targets = analysis.class_discrimination.CSCLookup() & 'count_start=0 and count_stop=500'
 bin_config = train.BinConfig() & 'bin_counts = 91'
 
-train.CVTrainedPoissonLike().populate(targets, bin_config, order='random', reserve_jobs=True)
+#train.CVTrainedPoissonLike().populate(targets, bin_config, order='random', reserve_jobs=True)
 #
-# train.CVTrainedModelWithStateAlt().populate(targets, bin_config, order='random', reserve_jobs=True)
+train.CVTrainedModelWithStateAlt().populate(targets, bin_config, order='random', reserve_jobs=True)
 #
-# train.CVTrainedFixedLikelihoodAlt().populate(targets, bin_config, order='random', reserve_jobs=True)
+train.CVTrainedFixedLikelihoodAlt().populate(targets, bin_config, order='random', reserve_jobs=True)
 # #
 # train.BestRecoveredModel().populate(restr, order='random', reserve_jobs=True)
 #
