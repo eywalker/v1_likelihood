@@ -330,6 +330,7 @@ class RefinedTrainParam(dj.Lookup):
     )]
 
 
+
 @schema
 class CVTrainedModel(dj.Computed):
     definition = """
@@ -956,7 +957,6 @@ class CVTrainedModelWithState(dj.Computed):
         #key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
 
         self.insert1(key)
-
 
 
 
@@ -2187,7 +2187,7 @@ class CVTrainedPoissonLike(dj.Computed):
         h1, h2 = [int(x) for x in (PoissonLikeModelDesign() & key).fetch1('hidden1', 'hidden2')]
         seed = key['train_seed']
 
-        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net = PoissonLike(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
         net.cuda()
         loss = nn.CrossEntropyLoss().cuda()
 
