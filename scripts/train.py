@@ -48,7 +48,7 @@ bin_config = train.BinConfig() & 'bin_counts = 91'
 #
 train.CVTrainedModelWithStateAlt().populate(targets, bin_config, order='random', reserve_jobs=True)
 #
-train.CVTrainedFixedLikelihoodAlt().populate(targets, bin_config, order='random', reserve_jobs=True)
+#train.CVTrainedFixedLikelihoodAlt().populate(targets, bin_config, order='random', reserve_jobs=True)
 # #
 # train.BestRecoveredModel().populate(restr, order='random', reserve_jobs=True)
 #

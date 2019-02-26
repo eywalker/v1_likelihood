@@ -979,10 +979,6 @@ class CVTrainedModelWithStateAlt(dj.Computed):
     model: external-model  # saved model
     """
 
-    @property
-    def key_source(self):
-        missing = ((CVSet * (BinConfig & 'bin_counts=91').proj()) - BestRecoveredModel()).fetch('KEY')
-        return (CVSet * BinConfig * ModelDesign * RefinedTrainParam * TrainSeed & missing).proj()
 
     def load_model(self, key=None):
         if key is None:
@@ -2214,10 +2210,25 @@ class BestPoissonLike(dj.Computed):
         return CVSet() * BinConfig() & CVTrainedPoissonLike
 
     def make(self, key):
-        best = best_model(CVTrainedPoissonLike, key) * PoissonLikeModelDesign
+        best = best_model(CVTrainedPoissonLike & 'model_saved = True', key) * PoissonLikeModelDesign
         # if duplicate score happens to occur, pick the model with the largest hidden layer
         selected = best.fetch(dj.key, order_by='hidden1 DESC')[0]
 
         self.insert(CVTrainedPoissonLike() & selected, ignore_extra_fields=True)
 
 
+@schema
+class BestPoissonLikeByBin(dj.Computed):
+    definition = """
+    -> CVSet
+    -> BinConfig
+    ---
+    -> PoissonLikeModelDesign
+    -> PoissonLikeTrainParam
+    -> TrainSeed
+    cnn_train_score: float  # score on train set
+    cnn_valid_score:  float  # score on test set
+    avg_sigma:   float  # average width of the likelihood functions
+    model_saved: bool  # whether model was saved
+    model: longblob  # saved model
+    """
