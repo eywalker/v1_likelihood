@@ -28,11 +28,15 @@ with open('/external/pass.dat', 'r'):
     external_access = True
 
 
-def best_model(model, key=None):
+def best_model(model, extra=None, key=None):
     if key is None:
         key = {}
     targets = model & key
-    return targets * (CVSet * BinConfig).aggr(targets, min_value='min(cnn_valid_score)') & 'cnn_valid_score = min_value'
+
+    aggr_targets = CVSet * BinConfig * EvalObjective
+    if extra is not None:
+        aggr_targets = aggr_targets * extra
+    return targets * aggr_targets.aggr(targets, min_loss='min(valid_loss)') & 'valid_loss = min_loss'
 
 def extend_ones(x):
     return np.concatenate([x, np.ones([x.shape[0], 1])], axis=1)
@@ -231,6 +235,10 @@ class BaseModel(dj.Computed):
         ---
         train_loss: float   # loss on train set
         valid_loss:  float   # loss on test set
+        train_ce:    float   # ce on train set
+        valid_ce:    float   # ce on test set
+        train_mse:   float   # mse on train set
+        valid_mse:   float   # mse on test set
         avg_sigma:   float   # average width of the likelihood functions
         model_saved: bool   # whether model was saved
         model: external-model  # saved model
@@ -272,16 +280,18 @@ class BaseModel(dj.Computed):
         return train_x, train_t, valid_x, valid_t
 
     def make_objective(self, valid_x, valid_t, prior, delta, obj_type='ce'):
-        def objective(net, x=None, t=None):
+        def objective(net, x=None, t=None, obj=None):
+            if obj is None:
+                obj = obj_type
             if x is None and t is None:
                 x = valid_x
                 t = valid_t
             net.eval()
             y = net(x)
             posterior = y + prior
-            if obj_type == 'ce':
+            if obj == 'ce':
                 v = F.cross_entropy(posterior, t)
-            elif obj_type == 'mse':
+            elif obj == 'mse':
                 _, loc = torch.max(posterior, dim=1)
                 v = (t.double() - loc.double()).pow(2).mean().sqrt() * delta
             return v.data.cpu().numpy()[0]
@@ -400,6 +410,12 @@ class BaseModel(dj.Computed):
         key['train_loss'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
         key['valid_loss'] = objective(net, x=valid_x, t=valid_t)
 
+        key['train_ce'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda(), obj='ce')
+        key['valid_ce'] = objective(net, x=valid_x, t=valid_t, obj='ce')
+
+        key['train_mse'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda(), obj='mse')
+        key['valid_mse'] = objective(net, x=valid_x, t=valid_t, obj='mse')
+
         y = net(valid_x)
         yd = y.data.cpu().numpy()
         yd = np.exp(yd)
@@ -487,3 +503,27 @@ class CVTrainedFixedLikelihood(BaseModel):
         return int(len(scores) == 0 or valid_loss < scores.min())
 
 
+#### Aggregator tables
+@schema
+class BestPoissonLike(dj.Computed):
+    definition = """
+    -> CVTrainedModel
+    ---
+    train_loss:  float   # score on train set
+    valid_loss:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    model: longblob      # saved model state
+    """
+
+    @property
+    def key_source(self):
+        return CVSet() * BinConfig() * EvalObjective() & (CVTrainedModel & 'nonlin="none"')
+
+    def make(self, key):
+        best = best_model(CVTrainedModel & 'nonlin="none"' & 'model_saved = True', key=key) * ModelDesign
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
+        selected = best.fetch('KEY', order_by='hidden1 DESC')[0]
+        data = (CVTrainedModel & selected).fetch1()
+        assert data['model_saved'], 'Model was not saved despite being the best!!'
+        data['model'] = {k: data['model'][k][0] for k in data['model'].dtype.fields}
+        self.insert1(data, ignore_extra_fields=True)
