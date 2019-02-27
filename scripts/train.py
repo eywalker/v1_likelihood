@@ -45,7 +45,7 @@ targets = analysis.class_discrimination.CSCLookup() & 'count_start=0 and count_s
 
 #train.CVTrainedPoissonLike().populate(targets, bin_config, order='random', reserve_jobs=True)
 #
-train2.CVTrainedModel().populate('nonlin="none"', targets, order='random', reserve_jobs=True)
+train2.CVTrainedModel().populate('nonlin="relu"', targets, order='random', reserve_jobs=True)
 #
 #train.CVTrainedFixedLikelihoodAlt().populate(targets, bin_config, order='random', reserve_jobs=True)
 # #
