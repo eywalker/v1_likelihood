@@ -179,7 +179,7 @@ class EvalObjective(dj.Lookup):
     definition = """
     objective: varchar(16)  # type of objective
     """
-    contents = zip(['ce'])
+    contents = zip(['ce', 'mse'])
 
 
 @schema
@@ -504,6 +504,33 @@ class CVTrainedFixedLikelihood(BaseModel):
 
 
 #### Aggregator tables
+
+@schema
+class BestSimplePoissonLike(dj.Computed):
+    definition = """
+    -> CVTrainedModel
+    ---
+    train_loss:  float   # score on train set
+    valid_loss:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    model: longblob      # saved model state
+    """
+
+    @property
+    def key_source(self):
+        return CVSet() * BinConfig() * EvalObjective() & (CVTrainedModel & 'nonlin = "none"' & 'model_id = "b4b147bc522828731f1a016bfa72c073"')
+
+    def make(self, key):
+        best = best_model(CVTrainedModel & 'nonlin ="none"' & 'model_saved = True' & 'model_id = "b4b147bc522828731f1a016bfa72c073"', key=key) * ModelDesign
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
+        selected = best.fetch('KEY', order_by='hidden1 DESC')[0]
+        data = (CVTrainedModel & selected).fetch1()
+        assert data['model_saved'], 'Model was not saved despite being the best!!'
+        data['model'] = {k: data['model'][k][0] for k in data['model'].dtype.fields}
+        self.insert1(data, ignore_extra_fields=True)
+
+
+
 @schema
 class BestPoissonLike(dj.Computed):
     definition = """
@@ -521,6 +548,58 @@ class BestPoissonLike(dj.Computed):
 
     def make(self, key):
         best = best_model(CVTrainedModel & 'nonlin="none"' & 'model_saved = True', key=key) * ModelDesign
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
+        selected = best.fetch('KEY', order_by='hidden1 DESC')[0]
+        data = (CVTrainedModel & selected).fetch1()
+        assert data['model_saved'], 'Model was not saved despite being the best!!'
+        data['model'] = {k: data['model'][k][0] for k in data['model'].dtype.fields}
+        self.insert1(data, ignore_extra_fields=True)
+
+
+
+
+@schema
+class BestNonlin(dj.Computed):
+    definition = """
+    -> CVTrainedModel
+    ---
+    train_loss:  float   # score on train set
+    valid_loss:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    model: longblob      # saved model state
+    """
+
+    @property
+    def key_source(self):
+        return CVSet() * BinConfig() * EvalObjective() & (CVTrainedModel & 'nonlin != "none"')
+
+    def make(self, key):
+        best = best_model(CVTrainedModel & 'nonlin !="none"' & 'model_saved = True', key=key) * ModelDesign
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
+        selected = best.fetch('KEY', order_by='hidden1 DESC')[0]
+        data = (CVTrainedModel & selected).fetch1()
+        assert data['model_saved'], 'Model was not saved despite being the best!!'
+        data['model'] = {k: data['model'][k][0] for k in data['model'].dtype.fields}
+        self.insert1(data, ignore_extra_fields=True)
+
+
+@schema
+class BestOverall(dj.Computed):
+    definition = """
+    -> CVTrainedModel
+    ---
+    train_loss:  float   # score on train set
+    valid_loss:  float   # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    model: longblob      # saved model state
+    """
+
+    @property
+    def key_source(self):
+        return CVSet() * BinConfig() * EvalObjective() & CVTrainedModel
+
+    def make(self, key):
+        best = best_model(CVTrainedModel & 'model_saved = True', key=key) * ModelDesign
         # if duplicate score happens to occur, pick the model with the largest hidden layer
         selected = best.fetch('KEY', order_by='hidden1 DESC')[0]
         data = (CVTrainedModel & selected).fetch1()
