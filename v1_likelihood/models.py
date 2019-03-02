@@ -98,14 +98,21 @@ class CombinedNet(nn.Module):
         x = self.ro_layer(x)
         return x
 
-    def l2_weights(self):
-        reg = dict(weight=0.0)
+    def l2_weights(self, avg=True):
+        reg = dict(weight=0.0, counts=0)
+
+
         def accum(mod):
             if isinstance(mod, nn.Linear):
                 reg['weight'] = reg['weight'] + mod.weight.pow(2).sum()
+                reg['counts'] = reg['counts'] + mod.weight.numel()
 
         self.apply(accum)
-        return reg['weight']
+
+        ret = reg['weight']
+        if avg:
+            ret = ret / reg['counts']
+        return ret
 
     def initialize(self):
         def fn(mod):
@@ -219,16 +226,21 @@ class FixedLikelihoodNet(nn.Module):
         # remove unneeded dimensions
         return shifted_likelihood.view([-1, shifted_likelihood.shape[-1]])
 
-    def l2_weights(self):
-        reg = dict(weight=0.0)
+    def l2_weights(self, avg=True):
+        reg = dict(weight=0.0, counts=0)
+
 
         def accum(mod):
             if isinstance(mod, nn.Linear):
                 reg['weight'] = reg['weight'] + mod.weight.pow(2).sum()
+                reg['counts'] = reg['counts'] + mod.weight.numel()
 
         self.apply(accum)
 
-        return reg['weight']
+        ret = reg['weight']
+        if avg:
+            ret = ret / reg['counts']
+        return ret
 
     def initialize(self):
         def fn(mod):
@@ -308,16 +320,21 @@ class FlexiNet(nn.Module):
         # remove unneeded dimensions
         return shifted_likelihood.view([-1, shifted_likelihood.shape[-1]])
 
-    def l2_weights(self):
-        reg = dict(weight=0.0)
+    def l2_weights(self, avg=True):
+        reg = dict(weight=0.0, counts=0)
+
 
         def accum(mod):
             if isinstance(mod, nn.Linear):
                 reg['weight'] = reg['weight'] + mod.weight.pow(2).sum()
+                reg['counts'] = reg['counts'] + mod.weight.numel()
 
         self.apply(accum)
 
-        return reg['weight']
+        ret = reg['weight']
+        if avg:
+            ret = ret / reg['counts']
+        return ret
 
     def initialize(self):
         def fn(mod):

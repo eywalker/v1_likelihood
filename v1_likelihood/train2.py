@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from .cd_dataset import CleanContrastSessionDataSet
 
-schema = dj.schema('edgar_cd_ml2')
+schema = dj.schema('edgar_cd_ml2_updated')  # updated on Mar 2, 2019
 
 dj.config['external-model'] = dict(
     protocol='file',
@@ -215,7 +215,7 @@ class TrainParam(dj.Lookup):
         (0.2, 0.5),      # dropout rate
         (1e-4, 1e-3),    # initialization std
         (3, 30, 300),  # smoothness
-        (0.5, 1)        # l2_reg
+        (0.0, 0.5)        # l2_reg
     )]
 
 
