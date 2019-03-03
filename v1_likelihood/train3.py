@@ -349,7 +349,9 @@ class BaseModel(dj.Computed):
                         # if smoothness computation overflows, then don't bother with it
                         smoothness = 0
                     score = loss(post, t)
-                    score = score + alpha * smoothness + beta * net.l2_weights()
+                    score = score + alpha * smoothness
+                    if beta > 0:
+                        score = score + beta * net.l2_weights_per_layer()
                     score.backward()
                     optimizer.step()
                 if epoch % 10 == 0:

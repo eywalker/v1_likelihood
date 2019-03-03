@@ -114,6 +114,18 @@ class CombinedNet(nn.Module):
             ret = ret / reg['counts']
         return ret
 
+    def l2_weights_per_layer(self):
+        reg = dict(weight=0.0, counts=0)
+
+        def accum(mod):
+            if isinstance(mod, nn.Linear):
+                reg['weight'] = reg['weight'] + mod.weight.pow(2).mean()
+                reg['counts'] = reg['counts'] + 1
+
+        self.apply(accum)
+
+        return reg['weight'] / reg['counts']
+
     def initialize(self):
         def fn(mod):
             if isinstance(mod, nn.Linear):
@@ -241,6 +253,18 @@ class FixedLikelihoodNet(nn.Module):
         if avg:
             ret = ret / reg['counts']
         return ret
+
+    def l2_weights_per_layer(self):
+        reg = dict(weight=0.0, counts=0)
+
+        def accum(mod):
+            if isinstance(mod, nn.Linear):
+                reg['weight'] = reg['weight'] + mod.weight.pow(2).mean()
+                reg['counts'] = reg['counts'] + 1
+
+        self.apply(accum)
+
+        return reg['weight'] / reg['counts']
 
     def initialize(self):
         def fn(mod):
