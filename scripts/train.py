@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from v1_likelihood import train2, analysis, simulate_poisson, simulate_gaussian
+from v1_likelihood import train3, analysis, simulate_poisson, simulate_gaussian
 import datajoint as dj
 
 #simulate_poisson.GaussTuningSet().fill()
@@ -45,7 +45,7 @@ targets = analysis.class_discrimination.CSCLookup() & 'count_start=0 and count_s
 
 #train.CVTrainedPoissonLike().populate(targets, bin_config, order='random', reserve_jobs=True)
 #
-train2.CVTrainedModel().populate('objective="mse"', targets, order='random', reserve_jobs=True)
+train3.CVTrainedModel().populate('objective="mse"', targets, order='random', reserve_jobs=True)
 #
 #train.CVTrainedFixedLikelihoodAlt().populate(targets, bin_config, order='random', reserve_jobs=True)
 # #
