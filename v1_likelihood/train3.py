@@ -356,7 +356,7 @@ class BaseModel(dj.Computed):
                         except:
                             # if L2 weight overflows, skip it
                             l2 = 0
-                        score = score + beta * ls
+                        score = score + beta * l2
                     score.backward()
                     optimizer.step()
                 if epoch % 10 == 0:
