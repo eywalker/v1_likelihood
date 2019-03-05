@@ -547,7 +547,7 @@ class CVTrainedModel(BaseModel):
 
     def check_to_save(self, key, valid_loss):
         scores_mse, scores_ce = (self & (CVSet * BinConfig * EvalObjective * NonLinearity & key)).fetch('valid_mse', 'valid_ce')
-        return int(len(scores) == 0 or key['valid_mse'] < scores_mse.min() or key['valid_ce'] < scores_ce.min())
+        return int(len(scores_mse) == 0 or key['valid_mse'] < scores_mse.min() or key['valid_ce'] < scores_ce.min())
 
 
 
