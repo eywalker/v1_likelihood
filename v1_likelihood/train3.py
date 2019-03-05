@@ -32,15 +32,15 @@ except:
     pass
 
 
-def best_model(model, extra=None, key=None):
+def best_model(model, extra=None, key=None, field='valid_loss'):
     if key is None:
         key = {}
     targets = model & key
 
-    aggr_targets = CVSet * BinConfig * EvalObjective
+    aggr_targets = CVSet * BinConfig
     if extra is not None:
         aggr_targets = aggr_targets * extra
-    return targets * aggr_targets.aggr(targets, min_loss='min(valid_loss)') & 'valid_loss = min_loss'
+    return targets * aggr_targets.aggr(targets, min_loss='min({})'.format(field)) & '{} = min_loss'.format(field)
 
 def extend_ones(x):
     return np.concatenate([x, np.ones([x.shape[0], 1])], axis=1)
@@ -168,7 +168,7 @@ class TrainSeed(dj.Lookup):
     # training seed
     train_seed:   int       # training seed
     """
-    contents = zip((8, 92, 123))
+    contents = zip((-1, 8, 92, 123))
 
 
 @schema
@@ -195,6 +195,8 @@ class ModelDesign(dj.Lookup):
     hidden2:  int      # size of second hidden layer
     """
     contents = [(list_hash(x),) + x for x in [
+        (0, 0),
+        (400, 400),
         (600, 600),
         (800, 800),
         (1000, 1000)
@@ -248,6 +250,10 @@ class BaseModel(dj.Computed):
         model: external-model  # saved model
         """
         return def_str.format(self.extra_deps)
+
+    @property
+    def key_source(self):
+        return super().key_source & 'train_seed >= 0'
 
     def get_dataset(self, key=None):
         if key is None:
@@ -396,6 +402,64 @@ class BaseModel(dj.Computed):
     def check_to_save(self, key, valid_loss):
         raise NotImplementedError
 
+    def register_model(self, key, state_dict, dryrun=False):
+        key = key.copy()
+        if not external_access:
+            raise ValueError('No access to external! Will not be able to save model!')
+
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        train_x, train_t, valid_x, valid_t, prior, objective = self.prepare_parts(key)
+        train_dataset = TensorDataset(train_x, train_t)
+
+        key['train_seed'] = -1
+        net = self.prepare_model(key)
+
+        net.load_state_dict(state_dict)
+        net.cuda()
+
+
+
+        print('Evaluating...')
+        net.eval()
+
+        key['train_loss'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        key['valid_loss'] = objective(net, x=valid_x, t=valid_t)
+
+        key['train_ce'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda(), obj='ce')
+        key['valid_ce'] = objective(net, x=valid_x, t=valid_t, obj='ce')
+
+        key['train_mse'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda(), obj='mse')
+        key['valid_mse'] = objective(net, x=valid_x, t=valid_t, obj='mse')
+
+        y = net(valid_x)
+        yd = y.data.cpu().numpy()
+        yd = np.exp(yd)
+        yd = yd / yd.sum(axis=1, keepdims=True)
+
+        loc = yd.argmax(axis=1)
+        ds = (np.arange(nbins) - loc[:, None]) ** 2
+        avg_sigma = np.mean(np.sqrt(np.sum(yd * ds, axis=1))) * delta
+        if np.isnan(avg_sigma):
+            avg_sigma = -1
+
+        key['avg_sigma'] = avg_sigma
+
+        # determine if the state should be saved
+        key['model_saved'] = 1
+
+        blob = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+
+        key['model'] = blob
+        key['model_saved'] = int(key['model_saved'])
+
+        if not dryrun:
+            self.insert1(key)
+
+        return key
+
+
 
     def make(self, key):
         if not external_access:
@@ -462,6 +526,7 @@ class BaseModel(dj.Computed):
         self.insert1(key)
 
 
+
 @schema
 class CVTrainedModel(BaseModel):
     extra_deps = """
@@ -481,8 +546,8 @@ class CVTrainedModel(BaseModel):
         return net
 
     def check_to_save(self, key, valid_loss):
-        scores = (self & (CVSet * BinConfig * EvalObjective * NonLinearity & key)).fetch('valid_loss')
-        return int(len(scores) == 0 or valid_loss < scores.min())
+        scores_mse, scores_ce = (self & (CVSet * BinConfig * EvalObjective * NonLinearity & key)).fetch('valid_mse', 'valid_ce')
+        return int(len(scores) == 0 or key['valid_mse'] < scores_mse.min() or key['valid_ce'] < scores_ce.min())
 
 
 
@@ -517,8 +582,8 @@ class CVTrainedFixedLikelihood(BaseModel):
         return net
 
     def check_to_save(self, key, valid_loss):
-        scores = (self & (CVSet * BinConfig * EvalObjective & key)).fetch('valid_loss')
-        return int(len(scores) == 0 or valid_loss < scores.min())
+        scores_mse, scores_ce = (self & (CVSet * BinConfig * EvalObjective & key)).fetch('valid_mse', 'valid_ce')
+        return int(len(scores) == 0 or key['valid_mse'] < scores_mse.min() or key['valid_ce'] < scores_ce.min())
 
 
 #### Aggregator tables
@@ -553,74 +618,121 @@ class BestSimplePoissonLike(dj.Computed):
 class BestPoissonLike(dj.Computed):
     definition = """
     -> CVTrainedModel
+    (selection_objective) -> EvalObjective
     ---
-    train_loss:  float   # score on train set
-    valid_loss:  float   # score on test set
-    avg_sigma:   float   # average width of the likelihood functions
+    selected_train_loss:  float   # score on train set
+    selected_valid_loss:  float   # score on test set
     model: longblob      # saved model state
     """
 
     @property
     def key_source(self):
-        return CVSet() * BinConfig() * EvalObjective() & (CVTrainedModel & 'nonlin="none"')
+        return CVSet() * BinConfig() * EvalObjective().proj(selection_objective='objective') & (CVTrainedModel & 'nonlin = "none"')
 
     def make(self, key):
-        best = best_model(CVTrainedModel & 'nonlin="none"' & 'model_saved = True', key=key) * ModelDesign
+        valid_field = 'valid_{}'.format(key['selection_objective'].lower())
+        train_field = 'valid_{}'.format(key['selection_objective'].lower())
+
+        best = best_model(CVTrainedModel & 'nonlin = "none"' & 'model_saved = True', key=key, field=valid_field) * ModelDesign
         # if duplicate score happens to occur, pick the model with the largest hidden layer
         selected = best.fetch('KEY', order_by='hidden1 DESC')[0]
         data = (CVTrainedModel & selected).fetch1()
+        data['selection_objective'] = key['selection_objective']
+        data['selected_train_loss'] = data[train_field]
+        data['selected_valid_loss'] = data[valid_field]
         assert data['model_saved'], 'Model was not saved despite being the best!!'
         data['model'] = {k: data['model'][k][0] for k in data['model'].dtype.fields}
         self.insert1(data, ignore_extra_fields=True)
-
-
-
 
 @schema
 class BestNonlin(dj.Computed):
     definition = """
     -> CVTrainedModel
+    (selection_objective) -> EvalObjective
     ---
-    train_loss:  float   # score on train set
-    valid_loss:  float   # score on test set
-    avg_sigma:   float   # average width of the likelihood functions
+    selected_train_loss:  float   # score on train set
+    selected_valid_loss:  float   # score on test set
     model: longblob      # saved model state
     """
 
     @property
     def key_source(self):
-        return CVSet() * BinConfig() * EvalObjective() & (CVTrainedModel & 'nonlin != "none"')
+        return CVSet() * BinConfig() * EvalObjective().proj(selection_objective='objective') & (CVTrainedModel & 'nonlin != "none"')
 
     def make(self, key):
-        best = best_model(CVTrainedModel & 'nonlin !="none"' & 'model_saved = True', key=key) * ModelDesign
+        valid_field = 'valid_{}'.format(key['selection_objective'].lower())
+        train_field = 'valid_{}'.format(key['selection_objective'].lower())
+
+        best = best_model(CVTrainedModel & 'nonlin != "none"' & 'model_saved = True', key=key, field=valid_field) * ModelDesign
         # if duplicate score happens to occur, pick the model with the largest hidden layer
         selected = best.fetch('KEY', order_by='hidden1 DESC')[0]
         data = (CVTrainedModel & selected).fetch1()
+        data['selection_objective'] = key['selection_objective']
+        data['selected_train_loss'] = data[train_field]
+        data['selected_valid_loss'] = data[valid_field]
         assert data['model_saved'], 'Model was not saved despite being the best!!'
         data['model'] = {k: data['model'][k][0] for k in data['model'].dtype.fields}
         self.insert1(data, ignore_extra_fields=True)
+
 
 
 @schema
 class BestOverall(dj.Computed):
     definition = """
     -> CVTrainedModel
+    (selection_objective) -> EvalObjective
     ---
-    train_loss:  float   # score on train set
-    valid_loss:  float   # score on test set
-    avg_sigma:   float   # average width of the likelihood functions
+    selected_train_loss:  float   # score on train set
+    selected_valid_loss:  float   # score on test set
     model: longblob      # saved model state
     """
 
     @property
     def key_source(self):
-        return CVSet() * BinConfig() * EvalObjective() & CVTrainedModel
+        return CVSet() * BinConfig() * EvalObjective().proj(selection_objective='objective') & CVTrainedModel
 
     def make(self, key):
-        best = best_model(CVTrainedModel & 'model_saved = True', key=key) * ModelDesign
+        valid_field = 'valid_{}'.format(key['selection_objective'].lower())
+        train_field = 'valid_{}'.format(key['selection_objective'].lower())
+
+        best = best_model(CVTrainedModel & 'model_saved = True', key=key, field=valid_field) * ModelDesign
         # if duplicate score happens to occur, pick the model with the largest hidden layer
         selected = best.fetch('KEY', order_by='hidden1 DESC')[0]
         data = (CVTrainedModel & selected).fetch1()
+        data['selection_objective'] = key['selection_objective']
+        data['selected_train_loss'] = data[train_field]
+        data['selected_valid_loss'] = data[valid_field]
+        assert data['model_saved'], 'Model was not saved despite being the best!!'
+        data['model'] = {k: data['model'][k][0] for k in data['model'].dtype.fields}
+        self.insert1(data, ignore_extra_fields=True)
+
+
+@schema
+class BestFixedLikelihood(dj.Computed):
+    definition = """
+    -> CVTrainedFixedLikelihood
+    (selection_objective) -> EvalObjective
+    ---
+    selected_train_loss:  float   # score on train set
+    selected_valid_loss:  float   # score on test set
+    model: longblob      # saved model state
+    """
+
+    @property
+    def key_source(self):
+        return CVSet() * BinConfig() * EvalObjective().proj(selection_objective='objective') & CVTrainedFixedLikelihood
+
+    def make(self, key):
+        valid_field = 'valid_{}'.format(key['selection_objective'].lower())
+        train_field = 'valid_{}'.format(key['selection_objective'].lower())
+
+        best = best_model(CVTrainedFixedLikelihood & 'model_saved = True', key=key, field=valid_field) * ModelDesign
+        # if duplicate score happens to occur, pick the model with the largest hidden layer
+        selected = best.fetch('KEY', order_by='hidden1 DESC')[0]
+        data = (CVTrainedFixedLikelihood & selected).fetch1()
+        data['selection_objective'] = key['selection_objective']
+        data['selected_train_loss'] = data[train_field]
+        data['selected_valid_loss'] = data[valid_field]
         assert data['model_saved'], 'Model was not saved despite being the best!!'
         data['model'] = {k: data['model'][k][0] for k in data['model'].dtype.fields}
         self.insert1(data, ignore_extra_fields=True)
