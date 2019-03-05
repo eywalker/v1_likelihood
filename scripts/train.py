@@ -43,7 +43,7 @@ import datajoint as dj
 #
 targets = analysis.class_discrimination.CSCLookup() & 'count_start=0 and count_stop=500'
 
-train3.CVTrainedModel().populate('objective="ce"', targets, bin_config, order='random', reserve_jobs=True)
+train3.CVTrainedModel().populate('objective="ce"', targets, order='random', reserve_jobs=True)
 #
 #train3.CVTrainedFixedLikelihood().populate('objective="mse"', targets, order='random', reserve_jobs=True)
 
