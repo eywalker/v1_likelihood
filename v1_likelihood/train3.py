@@ -631,7 +631,7 @@ class BestPoissonLike(dj.Computed):
 
     def make(self, key):
         valid_field = 'valid_{}'.format(key['selection_objective'].lower())
-        train_field = 'valid_{}'.format(key['selection_objective'].lower())
+        train_field = 'train_{}'.format(key['selection_objective'].lower())
 
         best = best_model(CVTrainedModel & 'nonlin = "none"' & 'model_saved = True', key=key, field=valid_field) * ModelDesign
         # if duplicate score happens to occur, pick the model with the largest hidden layer
@@ -661,7 +661,7 @@ class BestNonlin(dj.Computed):
 
     def make(self, key):
         valid_field = 'valid_{}'.format(key['selection_objective'].lower())
-        train_field = 'valid_{}'.format(key['selection_objective'].lower())
+        train_field = 'train_{}'.format(key['selection_objective'].lower())
 
         best = best_model(CVTrainedModel & 'nonlin != "none"' & 'model_saved = True', key=key, field=valid_field) * ModelDesign
         # if duplicate score happens to occur, pick the model with the largest hidden layer
@@ -693,7 +693,7 @@ class BestOverall(dj.Computed):
 
     def make(self, key):
         valid_field = 'valid_{}'.format(key['selection_objective'].lower())
-        train_field = 'valid_{}'.format(key['selection_objective'].lower())
+        train_field = 'train_{}'.format(key['selection_objective'].lower())
 
         best = best_model(CVTrainedModel & 'model_saved = True', key=key, field=valid_field) * ModelDesign
         # if duplicate score happens to occur, pick the model with the largest hidden layer
@@ -724,7 +724,7 @@ class BestFixedLikelihood(dj.Computed):
 
     def make(self, key):
         valid_field = 'valid_{}'.format(key['selection_objective'].lower())
-        train_field = 'valid_{}'.format(key['selection_objective'].lower())
+        train_field = 'train_{}'.format(key['selection_objective'].lower())
 
         best = best_model(CVTrainedFixedLikelihood & 'model_saved = True', key=key, field=valid_field) * ModelDesign
         # if duplicate score happens to occur, pick the model with the largest hidden layer
