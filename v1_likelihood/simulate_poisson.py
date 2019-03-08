@@ -2,6 +2,7 @@ import datajoint as dj
 import numpy as np
 import torch
 from torch.autograd import Variable
+from torch.nn import functional as F
 from torch import nn
 from attorch.train import early_stopping
 from torch.utils.data import TensorDataset, DataLoader
@@ -759,6 +760,271 @@ class PoissonTrainedModel(dj.Computed):
 class TrainedNetKL(dj.Computed):
     definition = """
     -> PoissonTrainedModel
+    ---
+    cnn_train_med_kl: float  # med KL
+    cnn_valid_med_kl: float  # med KL
+    cnn_test_med_kl: float  # med KL
+    cnn_train_kl: longblob   # KL values
+    cnn_valid_kl: longblob   # KL values
+    cnn_test_kl: longblob   # KL values
+    """
+
+    def make(self, key):
+        gt_resp = (PoissonSimulation() & key).simulate_responses()
+        rel = (PoissonTrainedModel() & key)
+        model = rel.load_model()
+        train_x, train_t, valid_x, valid_t, test_x, test_t = rel.get_dataset(keep_all=True)
+        train_x, train_t = Variable(train_x), Variable(train_t)
+
+        model.cuda()
+        model.eval()
+
+        delta, nbins, clip_outside = (BinConfig() & key).fetch1('bin_width', 'bin_counts', 'clip_outside')
+        delta = float(delta)
+        pv = (np.arange(nbins) - nbins // 2) * delta
+
+        set_types = ['train', 'valid', 'test']
+        set_x = [train_x, valid_x, test_x]
+
+        for st, x in zip(set_types, set_x):
+            gt_logl = gt_resp[st]['logl_f'](pv)
+            gt_nl = np.exp(gt_logl)
+            gt_nl = gt_nl / np.sum(gt_nl, axis=1, keepdims=True)
+
+            cnn_logl = model(x.cuda()).data.cpu().numpy()
+            cnn_nl = np.exp(cnn_logl)
+            cnn_nl = cnn_nl / np.sum(cnn_nl, axis=1, keepdims=True)
+
+            eps = 1e-15
+            KL = ((np.log(gt_nl + eps) - np.log(cnn_nl + eps)) * gt_nl).sum(axis=1)
+            key['cnn_{}_med_kl'.format(st)] = np.median(KL)
+            key['cnn_{}_kl'.format(st)] = KL
+
+        self.insert1(key)
+
+
+
+@schema
+class PoissonTrainedModelCE(dj.Computed):
+    definition = """
+    -> PoissonSimulation
+    -> BinConfig
+    -> ModelDesign
+    -> TrainParam
+    -> TrainSeed
+    ---
+    cnn_train_score: float   # score on train set
+    cnn_valid_score:  float   # score on validation set
+    cnn_test_score: float     # score on test set
+    avg_sigma:   float   # average width of the likelihood functions
+    model: longblob  # saved model
+    """
+
+    def load_model(self, key=None):
+        if key is None:
+            key = {}
+
+        rel = self & key
+
+        state_dict = rel.fetch1('model')
+        state_dict = {k: torch.from_numpy(state_dict[k][0]) for k in state_dict.dtype.names}
+
+        init_std = float((TrainParam() & rel).fetch1('init_std'))
+        dropout = float((TrainParam() & rel).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (ModelDesign() & rel).fetch1('hidden1', 'hidden2')]
+        nbins = int((BinConfig() & rel).fetch1('bin_counts'))
+
+        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net.load_state_dict(state_dict)
+        return net
+
+    def get_dataset(self, key=None, keep_all=False):
+        if key is None:
+            key = self.fetch1(dj.key)
+
+        resp = (PoissonSimulation() & key).simulate_responses()
+        bin_width = float((BinConfig() & key).fetch1('bin_width'))
+        bin_counts = int((BinConfig() & key).fetch1('bin_counts'))
+        clip_outside = bool((BinConfig() & key).fetch1('clip_outside')) and not keep_all
+
+        train_counts, train_ori = resp['train']['counts'], resp['train']['stimulus']
+        valid_counts, valid_ori = resp['valid']['counts'], resp['valid']['stimulus']
+        test_counts, test_ori = resp['test']['counts'], resp['test']['stimulus']
+
+        xv, train_bins = binnify(train_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+        _, valid_bins = binnify(valid_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+        _, test_bins = binnify(test_ori, delta=bin_width, nbins=bin_counts, clip=clip_outside)
+
+        good_pos = train_bins >= 0
+        train_counts = train_counts[good_pos]
+        train_ori = train_bins[good_pos]
+
+        good_pos = valid_bins >= 0
+        valid_counts = valid_counts[good_pos]
+        valid_ori = valid_bins[good_pos]
+
+        good_pos = test_bins >= 0
+        test_counts = test_counts[good_pos]
+        test_ori = test_bins[good_pos]
+
+        train_x = torch.Tensor(train_counts)
+        train_t = torch.Tensor(train_ori).type(torch.LongTensor)
+
+        valid_x = Variable(torch.Tensor(valid_counts))
+        valid_t = Variable(torch.Tensor(valid_ori).type(torch.LongTensor))
+
+        test_x = Variable(torch.Tensor(test_counts))
+        test_t = Variable(torch.Tensor(test_ori).type(torch.LongTensor))
+
+        return train_x, train_t, valid_x, valid_t, test_x, test_t
+
+
+
+    def make_objective(self, valid_x, valid_t, prior, delta):
+        def objective(net, x=None, t=None):
+            if x is None and t is None:
+                x = valid_x
+                t = valid_t
+            net.eval()
+            y = net(x)
+            posterior = y + prior
+            v = F.cross_entropy(posterior, t)
+            return v.data.cpu().numpy()[0]
+
+        return objective
+
+    def train(self, net, loss, objective, train_dataset, prior, alpha, init_lr):
+        learning_rates = init_lr * 3.0 ** (-np.arange(4))
+        for lr in learning_rates:
+            print('\n\n\n\n LEARNING RATE: {}'.format(lr))
+            optimizer = torch.optim.SGD(net.parameters(), lr=lr)
+            for epoch, valid_score in early_stopping(net, objective, interval=20, start=100, patience=20,
+                                                     max_iter=300000, maximize=False):
+                data_loader = DataLoader(train_dataset, shuffle=True, batch_size=128)
+                for x_, t_ in data_loader:
+                    x, t = Variable(x_).cuda(), Variable(t_).cuda()
+                    net.train()
+                    optimizer.zero_grad()
+                    y = net(x)
+                    post = y + prior
+                    val, _ = post.max(1, keepdim=True)
+                    post = post - val
+                    conv_filter = Variable(
+                        torch.from_numpy(np.array([-0.25, 0.5, -0.25])[None, None, :]).type(y.data.type()))
+                    try:
+                        smoothness = nn.functional.conv1d(y.unsqueeze(1), conv_filter).pow(2).mean()
+                    except:
+                        # if smoothness computation overflows, then don't bother with it
+                        smoothness = 0
+                    score = loss(post, t)
+                    score = score + alpha * smoothness
+                    score.backward()
+                    optimizer.step()
+                if epoch % 10 == 0:
+                    print('Score: {}'.format(score.data.cpu().numpy()[0]))
+                    # scheduler.step()
+
+    def test_model(self, key=None):
+        if key is None:
+            key = self.fetch1('KEY')
+
+        net = self.load_model(key)
+        net.cuda()
+        net.eval()
+
+        objective = self.prepare_objective(key)
+        train_x, train_t, valid_x, valid_t, test_x, test_t = self.get_dataset(key)
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+        test_x, test_t = test_x.cuda(), test_t.cuda()
+        train_score = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        valid_score = objective(net, x=valid_x, t=valid_t)
+        test_score = objective(net, x=test_x, t=test_t)
+
+        return train_score, valid_score, test_score
+
+    def prepare_objective(self, key):
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t, test_x, test_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+
+        return self.make_objective(valid_x, valid_t, prior, delta)
+
+    def make(self, key):
+        # train_counts, train_ori, valid_counts, valid_ori = self.get_dataset(key)
+
+        delta = float((BinConfig() & key).fetch1('bin_width'))
+        nbins = int((BinConfig() & key).fetch1('bin_counts'))
+
+        sigmaA = 3
+        sigmaB = 15
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+        prior = Variable(torch.from_numpy(prior)).cuda().float()
+
+        train_x, train_t, valid_x, valid_t, test_x, test_t = self.get_dataset(key)
+
+        valid_x, valid_t = valid_x.cuda(), valid_t.cuda()
+        test_x, test_t = test_x.cuda(), test_t.cuda()
+
+        train_dataset = TensorDataset(train_x, train_t)
+        # valid_dataset = TensorDataset(valid_x, valid_t)
+
+        objective = self.make_objective(valid_x, valid_t, prior, delta)
+
+        init_lr = float((TrainParam() & key).fetch1('learning_rate'))
+        alpha = float((TrainParam() & key).fetch1('smoothness'))
+        init_std = float((TrainParam() & key).fetch1('init_std'))
+        dropout = float((TrainParam() & key).fetch1('dropout'))
+        h1, h2 = [int(x) for x in (ModelDesign() & key).fetch1('hidden1', 'hidden2')]
+        seed = key['train_seed']
+
+        net = Net(n_output=nbins, n_hidden=[h1, h2], std=init_std, dropout=dropout)
+        net.cuda()
+        loss = nn.CrossEntropyLoss().cuda()
+
+        net.std = init_std
+        set_seed(seed)
+        net.initialize()
+
+        self.train(net, loss, objective, train_dataset, prior, alpha, init_lr)
+
+        print('Evaluating...')
+        net.eval()
+
+        key['cnn_train_score'] = objective(net, x=Variable(train_x).cuda(), t=Variable(train_t).cuda())
+        key['cnn_valid_score'] = objective(net, x=valid_x, t=valid_t)
+        key['cnn_test_score'] = objective(net, x=test_x, t=test_t)
+
+        y = net(test_x)
+        yd = y.data.cpu().numpy()
+        yd = np.exp(yd)
+        yd = yd / yd.sum(axis=1, keepdims=True)
+
+        loc = yd.argmax(axis=1)
+        ds = (np.arange(nbins) - loc[:, None]) ** 2
+        avg_sigma = np.mean(np.sqrt(np.sum(yd * ds, axis=1))) * delta
+        if np.isnan(avg_sigma):
+            avg_sigma = -1
+
+        key['avg_sigma'] = avg_sigma
+        key['model'] = {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+
+        self.insert1(key)
+
+
+@schema
+class TrainedNetKLCE(dj.Computed):
+    definition = """
+    -> PoissonTrainedModelCE
     ---
     cnn_train_med_kl: float  # med KL
     cnn_valid_med_kl: float  # med KL

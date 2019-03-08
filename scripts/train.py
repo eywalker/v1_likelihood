@@ -26,6 +26,8 @@ import datajoint as dj
 
 #simulate_poisson.TrainedNetKL().populate(order='random', reserve_jobs=True)
 
+simulate_gaussian.GaussianTrainedModelCE().populate(order='random', reserve_jobs=True)
+
 
 # train.CVSet().populate(order='random', reserve_jobs=True)
 # restr = train.BinConfig & 'bin_counts = 91'
@@ -41,11 +43,11 @@ import datajoint as dj
 
 #
 #
-targets = analysis.class_discrimination.CSCLookup() & 'count_start=0 and count_stop=500'
+targets = analysis.class_discrimination.CSCLookup() & 'count_start=250 or count_stop=250'
 
-#train3.CVTrainedModel().populate('objective="ce"', targets, order='random', reserve_jobs=True)
+train3.CVTrainedModel().populate('objective="mse"', targets, order='random', reserve_jobs=True)
 #
-train3.CVTrainedFixedLikelihood().populate('objective="ce"', targets, order='random', reserve_jobs=True)
+#train3.CVTrainedFixedLikelihood().populate('objective="mse"', targets, order='random', reserve_jobs=True)
 
 #
 #train.CVTrainedFixedLikelihoodAlt().populate(targets, bin_config, order='random', reserve_jobs=True)
