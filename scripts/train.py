@@ -27,6 +27,7 @@ import datajoint as dj
 #simulate_poisson.TrainedNetKL().populate(order='random', reserve_jobs=True)
 
 simulate_gaussian.GaussianTrainedModelCE().populate(order='random', reserve_jobs=True)
+simulate_poisson.PoissonTrainedModelCE().populate(order='random', reserve_jobs=True)
 
 
 # train.CVSet().populate(order='random', reserve_jobs=True)
