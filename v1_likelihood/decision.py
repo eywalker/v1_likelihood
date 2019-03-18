@@ -151,7 +151,7 @@ class TrainParam(dj.Lookup):
         ('SGD',),
         (0.01, 0.03),     # learning rate
         (0.2, 0.5),      # dropout rate
-        (1e-4, 1e-3),    # initialization std
+        (1e-4, 1e-3, 1e-2, 1e-1),    # initialization std
         (0, 0.5)        # l2_reg
     )]
 
