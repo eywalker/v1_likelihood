@@ -34,8 +34,8 @@ import datajoint as dj
 # restr = train.BinConfig & 'bin_counts = 91'
 # train.CVTrainedModelWithState().populate(restr, order='random', reserve_jobs=True)
 # train.LinearRegression().populate(order='random', reserve_jobs=True)
-# analysis.LikelihoodStats.populate(order='random', reserve_jobs=True)
-# analysis.LikelihoodSummary.populate(order='random', reserve_jobs=True)
+analysis.LikelihoodStats.populate(order='random', reserve_jobs=True)
+analysis.LikelihoodSummary.populate(order='random', reserve_jobs=True)
 
 # Manual step of selecting out the best model should occur here
 
@@ -50,7 +50,7 @@ import datajoint as dj
 #
 #train3.CVTrainedFixedLikelihood().populate('objective="mse"', targets, order='random', reserve_jobs=True)
 
-decision.CVTrainedLtoD.populate(order='random', reserve_jobs=True)
+#decision.CVTrainedLtoD.populate(order='random', reserve_jobs=True)
 
 #
 #train.CVTrainedFixedLikelihoodAlt().populate(targets, bin_config, order='random', reserve_jobs=True)
