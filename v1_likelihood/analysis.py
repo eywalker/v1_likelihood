@@ -119,3 +119,41 @@ class LikelihoodSummary(dj.Computed):
 
 
 
+@schema
+class FittedParams(dj.Computed):
+    definition = """
+    -> cd_dlset.TrainedLC
+    ---
+    subject_id: int
+    contrast: float 
+    stim_center: float
+    prior_a: float
+    lapse_rate: float
+    alpha: float
+    """
+
+    @property
+    def key_source(self):
+        target = (cd_dlset.CVSet * cd_dataset.CleanContrastSessionDataSet.proj(
+            dec_trainset_hash='dataset_hash') * class_discrimination.CSCLookup * class_discrimination.CleanSpikeCountSet & 'count_start = 0 and count_stop = 500')
+
+        return cd_dlset.TrainedLC & target & 'lc_id = 32'
+
+    def make(self, key):
+
+        targets = cd_dataset.CleanContrastSessionDataSet.proj(
+            dec_trainset_hash='dataset_hash') * class_discrimination.CSCLookup
+        subject_id, cont, config = (cd_dlset.TrainedLC * targets & key).fetch1('subject_id', 'dataset_contrast', 'lc_trained_config')
+        key['subject_id'] =  subject_id
+        key['contrast'] = float(cont)
+        param_values = [x.item() for x in config['paramValues'][0, 0][0]]
+        param_names = [x.item() for x in config['paramNames'][0, 0]]
+
+        key['stim_center'] = param_values[param_names.index('stimCenter')]
+        key['prior_a'] = param_values[param_names.index('priorA')]
+        key['lapse_rate'] = param_values[param_names.index('lapseRate')]
+        key['alpha'] = param_values[param_names.index('alpha')]
+
+        self.insert1(key)
+
+
