@@ -496,6 +496,190 @@ class FittedPoissonKL(dj.Computed):
 
         self.insert1(key)
 
+@schema
+class MLEFitTuningCurves(dj.Computed):
+    """
+    Perform fitting of tuning curves using Poisson loss - thus giving MLE based tuning curve fitting
+    """
+    definition = """
+    -> PoissonSimulation
+    ---
+    fit_amps: longblob            # amplitude of tuning curves
+    fit_centers: longblob        # center of tuning curves
+    fit_widths: longblob         # width of tuning curves
+    """
+
+    def make(self, key):
+        resp = (PoissonSimulation() & key).simulate_responses()
+
+        counts = np.concatenate([resp['train']['counts'], resp['valid']['counts']])
+        ori = np.concatenate([resp['train']['stimulus'], resp['valid']['stimulus']])
+        ct = counts.T
+
+        mu_counts = (ct * ori).sum(axis=1, keepdims=True) / ct.sum(axis=1, keepdims=True)
+        sigma_counts = np.sqrt(
+            (ct * ori ** 2).sum(axis=1, keepdims=True) / ct.sum(axis=1, keepdims=True) - mu_counts ** 2)
+        max_counts = counts.max(axis=0)
+
+        from scipy.optimize import minimize
+
+
+        def gaus(x, a, x0, sigma):
+            return a * np.exp(-(x - x0) ** 2 / 2 / (sigma ** 2))
+
+        def make_loss(ori, counts):
+            def loss(param):
+                """Compute Poisson loss"""
+                a, x0, sigma = param
+                mu = gaus(ori, a, x0, sigma)
+                logl = (counts * np.log(mu + 1e-13)).sum() - mu.sum()
+                return -logl
+
+            return loss
+
+        amps = []
+        centers = []
+        widths = []
+
+        for i in range(counts.shape[1]):
+            lf = make_loss(ori, counts[:, i])
+            res = minimize(lf, x0=[max_counts[i], mu_counts[i], sigma_counts[i]], method='L-BFGS-B',
+                           bounds=[[0, None], [None, None], [0, None]])
+            amps.append(res.x[0])
+            centers.append(res.x[1])
+            widths.append(res.x[2])
+
+        key['fit_amps'] = np.array(amps)
+        key['fit_centers'] = np.array(centers)
+        key['fit_widths'] = np.array(widths)
+
+        self.insert1(key)
+
+    def get_f(self, key=None):
+        """
+        Return a function that would return mean population response for stimuli.
+        Returns n_neurons x n_stimuli matrix
+        """
+        key = key or {}
+        centers, amps, widths = (self & key).fetch1('fit_centers', 'fit_amps', 'fit_widths')
+        centers = centers[:, None]
+        amps = amps[:, None]
+        widths = widths[:, None]
+
+        def f(stim):
+            return np.exp(-(stim - centers) ** 2 / 2 / widths ** 2) * amps
+
+        return f
+
+
+@schema
+class MLEFittedPoissonScores(dj.Computed):
+    definition = """
+    -> MLEFitTuningCurves
+    -> BinConfig
+    ---
+    fit_trainset_score: float 
+    fit_validset_score: float
+    fit_testset_score: float
+    """
+
+    def response_summary(self, key=None):
+        if key is None:
+            key = self.fetch1('KEY')
+
+        stim_keys = ['train', 'valid', 'test']
+
+        # this is the expected value of the spike counts for each stimulus
+        f = (MLEFitTuningCurves() & key).get_f()
+        responses = (PoissonSimulation() & key).simulate_responses()
+
+        responses['mean_f'] = f
+
+        for k in stim_keys:
+            resp_set = responses[k]
+            mus = f(resp_set['stimulus'])
+            counts = resp_set['counts']
+
+            def closure(counts):
+                def ll(decode_stim):
+                    mu_hat = f(decode_stim)[None, ...]  # 1 x units x dec_stim
+                    logl = (counts[..., None] * np.log(mu_hat)).sum(axis=1) - mu_hat.sum(axis=1)  # trials x dec_stim
+                    return logl
+
+                return ll
+
+            resp_set['expected_responses'] = mus
+            resp_set['logl_f'] = closure(counts)
+
+        return responses
+
+    def make(self, key):
+        resp = self.response_summary(key)
+
+        delta, nbins, clip_outside = (BinConfig() & key).fetch1('bin_width', 'bin_counts', 'clip_outside')
+        delta = float(delta)
+
+        sigmaA = 3
+        sigmaB = 15
+
+        set_types = ['train', 'valid', 'test']
+
+        pv = (np.arange(nbins) - nbins // 2) * delta
+        prior = np.log(np.exp(- pv ** 2 / 2 / sigmaA ** 2) / sigmaA + np.exp(- pv ** 2 / 2 / sigmaB ** 2) / sigmaB)
+
+        for st in set_types:
+            logl = resp[st]['logl_f'](pv)
+            ori = resp[st]['stimulus']
+            xv, ori_bins = binnify(ori, delta=delta, nbins=nbins, clip=clip_outside)
+
+            y = logl + prior
+            t_hat = np.argmax(y, 1)
+
+            key['fit_{}set_score'.format(st)] = np.sqrt(np.mean((t_hat.ravel() - ori_bins) ** 2)) * delta
+
+        self.insert1(key)
+
+
+@schema
+class MLEFittedPoissonKL(dj.Computed):
+    definition = """
+    -> MLEFittedPoissonScores
+    ---
+    fit_train_med_kl: float  # med KL
+    fit_valid_med_kl: float  # med KL
+    fit_test_med_kl: float  # med KL
+    fit_train_kl: longblob   # KL values
+    fit_valid_kl: longblob   # KL values
+    fit_test_kl: longblob   # KL values
+    """
+
+    def make(self, key):
+        gt_resp = (PoissonSimulation() & key).simulate_responses()
+        fit_resp = (MLEFittedPoissonScores() & key).response_summary()
+
+        delta, nbins, clip_outside = (BinConfig() & key).fetch1('bin_width', 'bin_counts', 'clip_outside')
+        delta = float(delta)
+        set_types = ['train', 'valid', 'test']
+        pv = (np.arange(nbins) - nbins // 2) * delta
+
+        for st in set_types:
+            gt_logl = gt_resp[st]['logl_f'](pv)
+            gt_nl = np.exp(gt_logl)
+            gt_nl = gt_nl / np.sum(gt_nl, axis=1, keepdims=True)
+
+            fit_logl = fit_resp[st]['logl_f'](pv)
+            fit_nl = np.exp(fit_logl)
+            fit_nl = fit_nl / np.sum(fit_nl, axis=1, keepdims=True)
+
+            eps = 1e-15
+            KL = ((np.log(gt_nl + eps) - np.log(fit_nl + eps)) * gt_nl).sum(axis=1)
+            key['fit_{}_med_kl'.format(st)] = np.median(KL)
+            key['fit_{}_kl'.format(st)] = KL
+
+        self.insert1(key)
+
+
+
 
 @schema
 class TrainSeed(dj.Lookup):
