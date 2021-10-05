@@ -1,0 +1,17 @@
+version: '3'
+services:
+  # Add as many notebooks as GPUs
+  notebook:
+    build: .
+    env_file: .env
+    ports:
+      - "5555:8888"
+    volumes:
+      - /mnt/lab/users/eywalker/notebooks:/notebooks
+      - /tmp:/tmp
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ../attorch:/src/attorch
+      - ../v1_likelihood:/src/v1_likelihood
+      - /mnt/lab/users/eywalker/data:/data
+      - /mnt/lab/users/eywalker/v1_project/data:/v1_data
+      - /mnt/scratch07/edgar_data/v1_likelihood:/external
